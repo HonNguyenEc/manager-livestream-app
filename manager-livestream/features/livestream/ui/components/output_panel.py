@@ -10,6 +10,11 @@ class OutputPanel:
     def __init__(self, parent):
         frame = ttk.LabelFrame(parent, text="Output", padding=10)
         frame.pack(fill="both", expand=True)
+
+        toolbar = ttk.Frame(frame)
+        toolbar.pack(fill="x", pady=(0, 6))
+        ttk.Button(toolbar, text="Clear Log", command=self.clear).pack(side="right")
+
         self.text = tk.Text(frame, wrap="word", font=("Consolas", 10))
         self.text.pack(fill="both", expand=True)
 

@@ -2,6 +2,7 @@
 
 import tkinter as tk
 from tkinter import ttk
+from datetime import datetime
 
 from features.livestream.config import AppConfig
 
@@ -97,6 +98,44 @@ class ShopInfoTab:
             width=60,
         ).grid(row=0, column=0, sticky="w", pady=3)
         ttk.Button(self.frame, text="Get Shop Info", command=on_get_shop_info).grid(row=1, column=0, sticky="w", pady=8)
+
+        info_frame = ttk.LabelFrame(self.frame, text="Shop Info", padding=10)
+        info_frame.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+
+        self.shop_name_var = tk.StringVar(value="-")
+        self.region_var = tk.StringVar(value="-")
+        self.expire_time_var = tk.StringVar(value="-")
+        self.is_main_shop_var = tk.StringVar(value="-")
+
+        rows = [
+            ("shop_name", self.shop_name_var),
+            ("region", self.region_var),
+            ("expire_time", self.expire_time_var),
+            ("is_main_shop", self.is_main_shop_var),
+        ]
+        for idx, (label, var) in enumerate(rows):
+            ttk.Label(info_frame, text=f"{label}:", width=16).grid(row=idx, column=0, sticky="w", pady=2)
+            ttk.Label(info_frame, textvariable=var).grid(row=idx, column=1, sticky="w", pady=2)
+
+        self.frame.columnconfigure(0, weight=1)
+        info_frame.columnconfigure(1, weight=1)
+
+    def set_shop_info(self, payload: dict):
+        body = payload.get("response_body", {}) if isinstance(payload, dict) else {}
+        self.shop_name_var.set(str(body.get("shop_name", "-")))
+        self.region_var.set(str(body.get("region", "-")))
+
+        expire_time = body.get("expire_time")
+        if isinstance(expire_time, int):
+            try:
+                self.expire_time_var.set(datetime.fromtimestamp(expire_time).strftime("%Y-%m-%d %H:%M:%S"))
+            except Exception:
+                self.expire_time_var.set(str(expire_time))
+        else:
+            self.expire_time_var.set(str(expire_time or "-"))
+
+        is_main_shop = body.get("is_main_shop")
+        self.is_main_shop_var.set(str(is_main_shop) if is_main_shop is not None else "-")
 
 
 class ActionTabs:

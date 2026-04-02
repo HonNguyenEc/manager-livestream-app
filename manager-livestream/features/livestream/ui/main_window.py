@@ -4,7 +4,8 @@ import json
 import queue
 import threading
 import tkinter as tk
-from tkinter import messagebox, ttk
+from pathlib import Path
+from tkinter import filedialog, messagebox, ttk
 
 from features.livestream.config import (
     AppConfig,
@@ -23,9 +24,12 @@ from features.livestream.ui.components.action_tabs import ActionTabs, ShopInfoTa
 from features.livestream.ui.components.brand_panel import BrandPanel
 from features.livestream.ui.components.config_panel import ConfigPanel
 from features.livestream.ui.components.output_panel import OutputPanel
+from features.obs.application.service import OBSService
+from features.obs.domain.models import OBSConfig
+from features.obs.ui.panel import OBSPanel
 from shared.logger import get_logger
 from shared.messages import UI_MESSAGES
-from shared.storage import write_json
+from shared.storage import read_json, write_json
 
 
 logger = get_logger("feature.livestream.ui")
@@ -42,12 +46,14 @@ class LiveShopeeManagerUI:
         self.service = LivestreamService()
         self._result_queue: queue.Queue = queue.Queue()
         self.brand_sessions: dict[str, dict] = {}
+        self.obs_services: dict[str, OBSService] = {}
         self.active_brand = "default"
         migrate_legacy_env()
 
         self._build_ui()
         self._load_defaults()
         self._poll_queue()
+        self._poll_obs_queue_state()
 
     def _build_ui(self):
         self._setup_styles()
@@ -80,10 +86,12 @@ class LiveShopeeManagerUI:
         config_tab = ttk.Frame(root_tabs, style="Card.TFrame", padding=10)
         livestream_tab = ttk.Frame(root_tabs, style="Card.TFrame", padding=10)
         shop_tab = ttk.Frame(root_tabs, style="Card.TFrame", padding=10)
+        obs_tab = ttk.Frame(root_tabs, style="Card.TFrame", padding=10)
 
         root_tabs.add(config_tab, text="Config")
         root_tabs.add(livestream_tab, text="Livestream")
         root_tabs.add(shop_tab, text="Shop")
+        root_tabs.add(obs_tab, text="OBS")
 
         self.config_panel = ConfigPanel(
             config_tab,
@@ -98,6 +106,26 @@ class LiveShopeeManagerUI:
             on_get_comment=self.get_comment_async,
         )
         self.shop_info_tab = ShopInfoTab(shop_tab, on_get_shop_info=self.get_shop_info_async)
+        self.obs_panel = OBSPanel(
+            obs_tab,
+            on_connect=self.obs_connect,
+            on_disconnect=self.obs_disconnect,
+            on_reload=self.obs_reload,
+            on_load_config_file=self.obs_load_config_file,
+            on_load_scenes=self.obs_load_scenes,
+            on_load_sources=self.obs_load_sources,
+            on_apply_scene=self.obs_apply_scene,
+            on_choose_folder=self.obs_choose_video_folder,
+            on_import_videos=self.obs_import_videos,
+            on_start_queue=self.obs_start_queue,
+            on_stop_queue=self.obs_stop_queue,
+            on_clear_queue=self.obs_clear_queue,
+            on_remove_video=self.obs_remove_video,
+            on_move_up_video=self.obs_move_up_video,
+            on_move_down_video=self.obs_move_down_video,
+            on_skip_video=self.obs_skip_video,
+        )
+        self.obs_panel.frame.pack(fill="both", expand=True)
         self.output_panel = OutputPanel(container)
 
     def _setup_styles(self):
@@ -149,11 +177,35 @@ class LiveShopeeManagerUI:
     def _load_brand_to_ui(self, brand_id: str):
         if brand_id in self.brand_sessions:
             self._restore_session(self.brand_sessions[brand_id])
+            self._load_shop_info_view(brand_id)
+            self._load_obs_view(brand_id)
             return
         cfg = load_brand_config(brand_id)
         self.config_panel.set_values(cfg)
         self.action_tabs.set_values(cfg)
         self.output_panel.clear()
+        self._load_shop_info_view(brand_id)
+        self._load_obs_view(brand_id)
+
+    def _shop_info_path(self, brand_id: str) -> Path:
+        return ensure_brand_data_dir(brand_id) / "shop_info.json"
+
+    def _load_shop_info_view(self, brand_id: str):
+        payload = read_json(self._shop_info_path(brand_id), default={})
+        self.shop_info_tab.set_shop_info(payload)
+
+    def _obs_service(self, brand_id: str) -> OBSService:
+        svc = self.obs_services.get(brand_id)
+        if svc is None:
+            svc = OBSService(brand_id)
+            self.obs_services[brand_id] = svc
+        return svc
+
+    def _load_obs_view(self, brand_id: str):
+        svc = self._obs_service(brand_id)
+        self.obs_panel.set_config(svc.load_config())
+        self.obs_panel.set_status(svc.status_text())
+        self.obs_panel.set_queue_state(svc.get_queue_state())
 
     def _current_config(self) -> AppConfig:
         return self.config_panel.to_config(self.action_tabs.get_live_config())
@@ -174,6 +226,10 @@ class LiveShopeeManagerUI:
                     if brand_id == self.active_brand:
                         self.config_panel.update_tokens(data)
                         self._append(msg)
+                elif kind == "shop_info":
+                    session["shop_info"] = data
+                    if brand_id == self.active_brand:
+                        self.shop_info_tab.set_shop_info(data)
                 else:
                     prefix = "[SUCCESS]" if kind == "ok" else "[ERROR]"
                     text = f"{prefix}[{brand_id}]\n{data}"
@@ -184,6 +240,15 @@ class LiveShopeeManagerUI:
             pass
         finally:
             self.root.after(120, self._poll_queue)
+
+    def _poll_obs_queue_state(self):
+        try:
+            svc = self._obs_service(self.active_brand)
+            self.obs_panel.set_queue_state(svc.get_queue_state())
+        except Exception:
+            pass
+        finally:
+            self.root.after(350, self._poll_obs_queue_state)
 
     def _on_switch_brand(self, _event=None):
         selected = self.brand_var.get().strip()
@@ -322,6 +387,7 @@ class LiveShopeeManagerUI:
             result = self.service.get_shop_info(cfg)
             brand_dir = ensure_brand_data_dir(brand_id)
             write_json(brand_dir / "shop_info.json", result)
+            self._result_queue.put(("shop_info", brand_id, result))
             self._result_queue.put(("ok", brand_id, json.dumps(result, ensure_ascii=False, indent=2)))
         except Exception as ex:
             logger.exception("get_shop_info failed")
@@ -330,3 +396,184 @@ class LiveShopeeManagerUI:
     def save_env(self):
         save_brand_config(self.active_brand, self._current_config())
         messagebox.showinfo("Đã lưu", UI_MESSAGES["save_success"])
+
+    def obs_connect(self):
+        try:
+            svc = self._obs_service(self.active_brand)
+            cfg = self.obs_panel.get_config()
+            info = svc.connect(cfg)
+            svc.save_config(cfg)
+            self.obs_panel.set_status(svc.status_text())
+            self._append(f"[SUCCESS][{self.active_brand}] OBS connect: {json.dumps(info, ensure_ascii=False)}")
+        except Exception as ex:
+            self.obs_panel.set_status(self._obs_service(self.active_brand).status_text())
+            self._append(f"[ERROR][{self.active_brand}] OBS connect lỗi: {ex}")
+
+    def obs_load_config_file(self):
+        """Load OBS config from external json file and apply to current brand UI."""
+        file_path = filedialog.askopenfilename(
+            title="Chọn file OBS config",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+        )
+        if not file_path:
+            return
+        try:
+            data = read_json(Path(file_path), default={})
+            cfg = OBSConfig.from_dict(data)
+            self.obs_panel.set_config(cfg)
+            self._obs_service(self.active_brand).save_config(cfg)
+            self._append(f"[SUCCESS][{self.active_brand}] Đã load OBS config từ file: {file_path}")
+        except Exception as ex:
+            self._append(f"[ERROR][{self.active_brand}] Load OBS config file lỗi: {ex}")
+
+    def obs_disconnect(self):
+        svc = self._obs_service(self.active_brand)
+        svc.stop_queue_runner()
+        svc.disconnect()
+        self.obs_panel.set_status(svc.status_text())
+        self.obs_panel.set_queue_state(svc.get_queue_state())
+        self._append(f"[SUCCESS][{self.active_brand}] OBS đã huỷ connect")
+
+    def obs_reload(self):
+        try:
+            svc = self._obs_service(self.active_brand)
+            cfg = self.obs_panel.get_config()
+            info = svc.reload(cfg)
+            svc.save_config(cfg)
+            self.obs_panel.set_status(svc.status_text())
+            self._append(f"[SUCCESS][{self.active_brand}] OBS reload: {json.dumps(info, ensure_ascii=False)}")
+        except Exception as ex:
+            self.obs_panel.set_status(self._obs_service(self.active_brand).status_text())
+            self._append(f"[ERROR][{self.active_brand}] OBS reload lỗi: {ex}")
+
+    def obs_load_scenes(self):
+        try:
+            svc = self._obs_service(self.active_brand)
+            scenes = svc.list_scenes()
+            self.obs_panel.set_scenes(scenes)
+            self._append(f"[SUCCESS][{self.active_brand}] OBS scenes: {len(scenes)}")
+        except Exception as ex:
+            self._append(f"[ERROR][{self.active_brand}] Load scenes lỗi: {ex}")
+
+    def obs_load_sources(self):
+        try:
+            svc = self._obs_service(self.active_brand)
+            scene = self.obs_panel.setting_component.scene_var.get().strip()
+            if not scene:
+                raise ValueError("Vui lòng chọn scene trước")
+            sources = svc.list_sources(scene)
+            self.obs_panel.set_sources(sources)
+            cfg = self.obs_panel.get_config()
+            svc.save_config(cfg)
+            self._append(f"[SUCCESS][{self.active_brand}] OBS sources: {len(sources)}")
+        except Exception as ex:
+            self._append(f"[ERROR][{self.active_brand}] Load sources lỗi: {ex}")
+
+    def obs_apply_scene(self):
+        try:
+            svc = self._obs_service(self.active_brand)
+            scene = self.obs_panel.setting_component.scene_var.get().strip()
+            if not scene:
+                raise ValueError("Vui lòng chọn scene")
+            svc.set_current_scene(scene)
+            cfg = self.obs_panel.get_config()
+            svc.save_config(cfg)
+            self._append(f"[SUCCESS][{self.active_brand}] Đã chuyển scene: {scene}")
+        except Exception as ex:
+            self._append(f"[ERROR][{self.active_brand}] Apply scene lỗi: {ex}")
+
+    def obs_choose_video_folder(self):
+        folder = filedialog.askdirectory(title="Chọn thư mục chứa video")
+        if not folder:
+            return
+        self.obs_panel.playlist_component.folder_var.set(folder)
+        cfg = self.obs_panel.get_config()
+        self._obs_service(self.active_brand).save_config(cfg)
+
+    def obs_import_videos(self):
+        try:
+            svc = self._obs_service(self.active_brand)
+            cfg = self.obs_panel.get_config()
+            if not cfg.video_folder:
+                raise ValueError("Vui lòng chọn thư mục video")
+            imported = svc.import_videos_from_folder(cfg.video_folder)
+            svc.save_config(cfg)
+            self.obs_panel.set_queue_state(svc.get_queue_state())
+            self._append(f"[SUCCESS][{self.active_brand}] Import {imported} video vào Queue 1")
+        except Exception as ex:
+            self._append(f"[ERROR][{self.active_brand}] Import video lỗi: {ex}")
+
+    def obs_start_queue(self):
+        try:
+            svc = self._obs_service(self.active_brand)
+            cfg = self.obs_panel.get_config()
+            svc.start_queue_runner(cfg)
+            svc.save_config(cfg)
+            self.obs_panel.set_queue_state(svc.get_queue_state())
+            self._append(f"[SUCCESS][{self.active_brand}] Đã start queue runner")
+        except Exception as ex:
+            self._append(f"[ERROR][{self.active_brand}] Start queue lỗi: {ex}")
+
+    def obs_stop_queue(self):
+        try:
+            svc = self._obs_service(self.active_brand)
+            svc.stop_queue_runner()
+            self.obs_panel.set_queue_state(svc.get_queue_state())
+            self._append(f"[SUCCESS][{self.active_brand}] Đã stop queue runner")
+        except Exception as ex:
+            self._append(f"[ERROR][{self.active_brand}] Stop queue lỗi: {ex}")
+
+    def obs_clear_queue(self):
+        try:
+            svc = self._obs_service(self.active_brand)
+            svc.clear_queues()
+            self.obs_panel.set_queue_state(svc.get_queue_state())
+            self._append(f"[SUCCESS][{self.active_brand}] Đã clear Queue 1 và Queue 2")
+        except Exception as ex:
+            self._append(f"[ERROR][{self.active_brand}] Clear queue lỗi: {ex}")
+
+    def obs_remove_video(self):
+        try:
+            svc = self._obs_service(self.active_brand)
+            index = self.obs_panel.get_selected_playlist_index()
+            if index < 0:
+                raise ValueError("Vui lòng chọn video trong Queue 1")
+            svc.remove_from_play_queue(index)
+            self.obs_panel.set_queue_state(svc.get_queue_state())
+            self._append(f"[SUCCESS][{self.active_brand}] Đã remove video khỏi Queue 1")
+        except Exception as ex:
+            self._append(f"[ERROR][{self.active_brand}] Remove video lỗi: {ex}")
+
+    def obs_move_up_video(self):
+        try:
+            svc = self._obs_service(self.active_brand)
+            index = self.obs_panel.get_selected_playlist_index()
+            if index < 0:
+                raise ValueError("Vui lòng chọn video trong Queue 1")
+            new_index = svc.move_play_queue_item(index, "up")
+            self.obs_panel.set_queue_state(svc.get_queue_state())
+            self.obs_panel.set_selected_playlist_index(new_index)
+            self._append(f"[SUCCESS][{self.active_brand}] Đã move up video")
+        except Exception as ex:
+            self._append(f"[ERROR][{self.active_brand}] Move up lỗi: {ex}")
+
+    def obs_move_down_video(self):
+        try:
+            svc = self._obs_service(self.active_brand)
+            index = self.obs_panel.get_selected_playlist_index()
+            if index < 0:
+                raise ValueError("Vui lòng chọn video trong Queue 1")
+            new_index = svc.move_play_queue_item(index, "down")
+            self.obs_panel.set_queue_state(svc.get_queue_state())
+            self.obs_panel.set_selected_playlist_index(new_index)
+            self._append(f"[SUCCESS][{self.active_brand}] Đã move down video")
+        except Exception as ex:
+            self._append(f"[ERROR][{self.active_brand}] Move down lỗi: {ex}")
+
+    def obs_skip_video(self):
+        try:
+            svc = self._obs_service(self.active_brand)
+            svc.skip_current()
+            self._append(f"[SUCCESS][{self.active_brand}] Đã yêu cầu skip video hiện tại")
+        except Exception as ex:
+            self._append(f"[ERROR][{self.active_brand}] Skip video lỗi: {ex}")
