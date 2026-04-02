@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Build / packaging
+build/
+dist/
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Environment / secrets
+.env
+envs/*.env
+!envs/.gitkeep
+
+# Runtime data
+data/brands/
+!data/brands/.gitkeep
+data/brand_state.json
+
+# Logs
+*.log

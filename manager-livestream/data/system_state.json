@@ -1,0 +1,9 @@
+{
+  "modules": {
+    "livestream": {
+      "name": "livestream",
+      "running": true,
+      "pid": 32472
+    }
+  }
+}
