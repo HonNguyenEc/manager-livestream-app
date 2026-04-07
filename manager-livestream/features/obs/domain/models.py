@@ -16,6 +16,7 @@ class OBSConfig:
     source_b_name: str = "VideoB"
     video_folder: str = ""
     crossfade_seconds: str = "2"
+    default_cooldown_seconds: str = "120"
 
     @staticmethod
     def from_dict(data: dict) -> "OBSConfig":
@@ -29,6 +30,7 @@ class OBSConfig:
             source_b_name=str(data.get("source_b_name", "VideoB")),
             video_folder=str(data.get("video_folder", "")),
             crossfade_seconds=str(data.get("crossfade_seconds", "2")),
+            default_cooldown_seconds=str(data.get("default_cooldown_seconds", "120")),
         )
 
     def to_dict(self) -> dict:
@@ -42,4 +44,5 @@ class OBSConfig:
             "source_b_name": self.source_b_name,
             "video_folder": self.video_folder,
             "crossfade_seconds": self.crossfade_seconds,
+            "default_cooldown_seconds": self.default_cooldown_seconds,
         }

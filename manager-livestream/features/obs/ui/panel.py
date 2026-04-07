@@ -3,7 +3,9 @@
 from tkinter import ttk
 
 from features.obs.domain.models import OBSConfig
-from features.obs.ui.components import OBSConfigTab, OBSPlaylistTab, OBSSettingTab
+from features.obs.ui.config_tab import OBSConfigTab
+from features.obs.ui.playlist_tab import OBSPlaylistTab
+from features.obs.ui.setting_tab import OBSSettingTab
 
 
 class OBSPanel:
@@ -28,6 +30,8 @@ class OBSPanel:
         on_move_up_video,
         on_move_down_video,
         on_skip_video,
+        on_prioritize_video,
+        on_set_video_cooldown,
     ):
         self.frame = ttk.Frame(parent, padding=10)
 
@@ -54,6 +58,8 @@ class OBSPanel:
             on_move_up=on_move_up_video,
             on_move_down=on_move_down_video,
             on_skip=on_skip_video,
+            on_prioritize=on_prioritize_video,
+            on_set_cooldown=on_set_video_cooldown,
         )
         self.config_component.frame.pack(fill="both", expand=True)
         self.setting_component.frame.pack(fill="both", expand=True)
@@ -65,11 +71,11 @@ class OBSPanel:
             port=self.config_component.port_var.get().strip(),
             password=self.config_component.password_var.get().strip(),
             scene_name=self.setting_component.scene_var.get().strip(),
-            source_name=self.setting_component.source_var.get().strip(),
             source_a_name=self.setting_component.source_a_var.get().strip(),
             source_b_name=self.setting_component.source_b_var.get().strip(),
             video_folder=self.playlist_component.folder_var.get().strip(),
             crossfade_seconds=self.setting_component.crossfade_var.get().strip(),
+            default_cooldown_seconds=self.setting_component.default_cooldown_var.get().strip(),
         )
 
     def set_config(self, cfg: OBSConfig):
@@ -77,11 +83,11 @@ class OBSPanel:
         self.config_component.port_var.set(str(cfg.port))
         self.config_component.password_var.set(cfg.password)
         self.setting_component.scene_var.set(cfg.scene_name)
-        self.setting_component.source_var.set(cfg.source_name)
         self.setting_component.source_a_var.set(cfg.source_a_name)
         self.setting_component.source_b_var.set(cfg.source_b_name)
         self.playlist_component.folder_var.set(cfg.video_folder)
         self.setting_component.crossfade_var.set(cfg.crossfade_seconds)
+        self.setting_component.default_cooldown_var.set(cfg.default_cooldown_seconds)
 
     def set_status(self, text: str):
         self.config_component.status_var.set(text)
@@ -92,11 +98,8 @@ class OBSPanel:
             self.setting_component.scene_var.set(scenes[0])
 
     def set_sources(self, sources: list[str]):
-        self.setting_component.source_combo["values"] = sources
         self.setting_component.source_a_combo["values"] = sources
         self.setting_component.source_b_combo["values"] = sources
-        if sources and self.setting_component.source_var.get() not in sources:
-            self.setting_component.source_var.set(sources[0])
         if sources and self.setting_component.source_a_var.get() not in sources:
             self.setting_component.source_a_var.set(sources[0])
         if sources and self.setting_component.source_b_var.get() not in sources:
@@ -110,11 +113,13 @@ class OBSPanel:
         self.playlist_component.runner_status_var.set("Running" if runner_running else "Stopped")
         slot_a = state.get("slot_a_file", "")
         slot_b = state.get("slot_b_file", "")
-        self.playlist_component.now_a_var.set(f"VideoA: {slot_a.split('\\\\')[-1] if slot_a else '-'}")
-        self.playlist_component.now_b_var.set(f"VideoB: {slot_b.split('\\\\')[-1] if slot_b else '-'}")
+        slot_a_name = slot_a.replace("\\", "/").split("/")[-1] if slot_a else "-"
+        slot_b_name = slot_b.replace("\\", "/").split("/")[-1] if slot_b else "-"
+        self.playlist_component.now_a_var.set(f"VideoA: {slot_a_name}")
+        self.playlist_component.now_b_var.set(f"VideoB: {slot_b_name}")
 
-    def get_selected_playlist_index(self) -> int:
-        return self.playlist_component.selected_playlist_index()
+    def get_selected_video_id(self) -> str:
+        return self.playlist_component.selected_video_id()
 
-    def set_selected_playlist_index(self, index: int):
-        self.playlist_component.set_selected_playlist_index(index)
+    def set_selected_video_id(self, video_id: str):
+        self.playlist_component.set_selected_video_id(video_id)

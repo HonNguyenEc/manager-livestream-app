@@ -1,7 +1,9 @@
 """Main livestream UI assembled from reusable components."""
 
 import json
+import os
 import queue
+import subprocess
 import threading
 import tkinter as tk
 from pathlib import Path
@@ -19,6 +21,9 @@ from features.livestream.config import (
     save_brand_config,
     set_active_brand,
 )
+from features.livestream.application import CommentSwitchService
+from features.livestream.application.ocr import OCRRegion, OCRSettings
+from features.livestream.application.comment_video_mapper import normalize_text
 from features.livestream.service import LivestreamService
 from features.livestream.ui.components.action_tabs import ActionTabs, ShopInfoTab
 from features.livestream.ui.components.brand_panel import BrandPanel
@@ -44,6 +49,7 @@ class LiveShopeeManagerUI:
         self.root.geometry("1080x760")
 
         self.service = LivestreamService()
+        self.comment_switch_service = CommentSwitchService()
         self._result_queue: queue.Queue = queue.Queue()
         self.brand_sessions: dict[str, dict] = {}
         self.obs_services: dict[str, OBSService] = {}
@@ -104,6 +110,12 @@ class LiveShopeeManagerUI:
             on_create=self.create_session_async,
             on_end=self.end_session_async,
             on_get_comment=self.get_comment_async,
+            on_test_comment_switch=self.test_comment_switch_async,
+            on_open_mapping_csv=self.open_mapping_csv,
+            on_open_ocr_log=self.open_ocr_log,
+            on_select_ocr_region=self.select_ocr_region,
+            on_start_ocr=self.start_ocr,
+            on_stop_ocr=self.stop_ocr,
         )
         self.shop_info_tab = ShopInfoTab(shop_tab, on_get_shop_info=self.get_shop_info_async)
         self.obs_panel = OBSPanel(
@@ -124,6 +136,8 @@ class LiveShopeeManagerUI:
             on_move_up_video=self.obs_move_up_video,
             on_move_down_video=self.obs_move_down_video,
             on_skip_video=self.obs_skip_video,
+            on_prioritize_video=self.obs_prioritize_video,
+            on_set_video_cooldown=self.obs_set_video_cooldown,
         )
         self.obs_panel.frame.pack(fill="both", expand=True)
         self.output_panel = OutputPanel(container)
@@ -161,6 +175,11 @@ class LiveShopeeManagerUI:
             "end_session_id": self.action_tabs.end.session_id_var.get(),
             "comment_session_id": self.action_tabs.comment.session_id_var.get(),
             "comment_cursor": self.action_tabs.comment.cursor_var.get(),
+            "comment_enable_switch": bool(self.action_tabs.comment.enable_switch_var.get()),
+            "comment_test_text": self.action_tabs.comment.test_comment_var.get(),
+            "comment_source": self.action_tabs.comment.source_var.get(),
+            "comment_use_ui_text": bool(self.action_tabs.comment.use_ui_text_var.get()),
+            "comment_dedupe_same_user": bool(self.action_tabs.comment.dedupe_same_user_var.get()),
         }
 
     def _restore_session(self, session: dict):
@@ -173,6 +192,13 @@ class LiveShopeeManagerUI:
         self.action_tabs.end.session_id_var.set(session.get("end_session_id", ""))
         self.action_tabs.comment.session_id_var.set(session.get("comment_session_id", ""))
         self.action_tabs.comment.cursor_var.set(session.get("comment_cursor", ""))
+        self.action_tabs.comment.enable_switch_var.set(bool(session.get("comment_enable_switch", False)))
+        self.action_tabs.comment.test_comment_var.set(session.get("comment_test_text", ""))
+        self.action_tabs.comment.source_var.set(session.get("comment_source", "api"))
+        self.action_tabs.comment.use_ui_text_var.set(bool(session.get("comment_use_ui_text", True)))
+        self.action_tabs.comment.dedupe_same_user_var.set(bool(session.get("comment_dedupe_same_user", True)))
+        self.action_tabs.comment._refresh_status_labels()
+        self.action_tabs.comment.set_ocr_status(self.comment_switch_service.is_ocr_running())
 
     def _load_brand_to_ui(self, brand_id: str):
         if brand_id in self.brand_sessions:
@@ -205,7 +231,36 @@ class LiveShopeeManagerUI:
         svc = self._obs_service(brand_id)
         self.obs_panel.set_config(svc.load_config())
         self.obs_panel.set_status(svc.status_text())
-        self.obs_panel.set_queue_state(svc.get_queue_state())
+        queue_state = svc.get_queue_state()
+        self.obs_panel.set_queue_state(queue_state)
+        self._set_comment_video_status(queue_state)
+
+    @staticmethod
+    def _basename_or_dash(path_text: str) -> str:
+        text = str(path_text or "").strip()
+        if not text:
+            return "-"
+        return normalize_text(os.path.basename(text))
+
+    def _set_comment_video_status(self, queue_state: dict):
+        active_slot = str((queue_state or {}).get("active_slot", "A")).upper()
+        slot_a = str((queue_state or {}).get("slot_a_file", ""))
+        slot_b = str((queue_state or {}).get("slot_b_file", ""))
+        now_file = slot_a if active_slot == "A" else slot_b
+
+        play_queue = list((queue_state or {}).get("play_queue", []) or [])
+        up_next_file = ""
+        if play_queue:
+            first = play_queue[0] if isinstance(play_queue[0], dict) else {}
+            up_next_file = str(first.get("path", ""))
+            if up_next_file and os.path.normcase(up_next_file) == os.path.normcase(now_file) and len(play_queue) > 1:
+                second = play_queue[1] if isinstance(play_queue[1], dict) else {}
+                up_next_file = str(second.get("path", ""))
+
+        self.action_tabs.comment.set_video_status(
+            now_playing=self._basename_or_dash(now_file),
+            up_next=self._basename_or_dash(up_next_file),
+        )
 
     def _current_config(self) -> AppConfig:
         return self.config_panel.to_config(self.action_tabs.get_live_config())
@@ -230,6 +285,18 @@ class LiveShopeeManagerUI:
                     session["shop_info"] = data
                     if brand_id == self.active_brand:
                         self.shop_info_tab.set_shop_info(data)
+                elif kind == "ocr_comment":
+                    payload = data if isinstance(data, dict) else {"raw": str(data)}
+                    text = f"[OCR][{brand_id}]\n{json.dumps(payload, ensure_ascii=False, indent=2)}"
+                    session["output"] = (session.get("output", "") + "\n" + text).strip()
+                    if brand_id == self.active_brand:
+                        self._append(text)
+                        action = str(payload.get("action", "")).strip()
+                        matched = str(payload.get("matched_video_id", "") or "-")
+                        self._append(
+                            f"[OCR-DEBUG][{brand_id}] action={action or '-'} | matched_video_id={matched} | "
+                            "log fields: timestamp, author, content, normalized, confidence, action, note"
+                        )
                 else:
                     prefix = "[SUCCESS]" if kind == "ok" else "[ERROR]"
                     text = f"{prefix}[{brand_id}]\n{data}"
@@ -244,11 +311,50 @@ class LiveShopeeManagerUI:
     def _poll_obs_queue_state(self):
         try:
             svc = self._obs_service(self.active_brand)
-            self.obs_panel.set_queue_state(svc.get_queue_state())
+            queue_state = svc.get_queue_state()
+            self.obs_panel.set_queue_state(queue_state)
+            self._set_comment_video_status(queue_state)
         except Exception:
             pass
         finally:
             self.root.after(350, self._poll_obs_queue_state)
+
+    def open_mapping_csv(self):
+        try:
+            brand_id = self.active_brand
+            catalog = self._obs_service(brand_id).get_video_catalog()
+            mapping_path = self.comment_switch_service.mapper.ensure_mapping_csv(brand_id, catalog)
+
+            if os.name == "nt":
+                os.startfile(str(mapping_path))  # type: ignore[attr-defined]
+            elif os.name == "posix":
+                subprocess.Popen(["xdg-open", str(mapping_path)])
+            else:
+                subprocess.Popen(["open", str(mapping_path)])
+
+            self._append(f"[SUCCESS][{brand_id}] Đã mở file mapping CSV: {mapping_path}")
+        except Exception as ex:
+            self._append(f"[ERROR][{self.active_brand}] Mở mapping CSV lỗi: {ex}")
+
+    def open_ocr_log(self):
+        try:
+            brand_id = self.active_brand
+            log_path = self.comment_switch_service.ensure_ocr_log_file(brand_id)
+
+            if os.name == "nt":
+                os.startfile(str(log_path))  # type: ignore[attr-defined]
+            elif os.name == "posix":
+                subprocess.Popen(["xdg-open", str(log_path)])
+            else:
+                subprocess.Popen(["open", str(log_path)])
+
+            self._append(f"[SUCCESS][{brand_id}] Đã mở OCR log: {log_path}")
+            self._append(
+                "[OCR-DEBUG] Log gồm: timestamp, author, content_raw, content_normalized, confidence, "
+                "action (accept/skip_duplicate/no_match/enqueue), dedupe settings."
+            )
+        except Exception as ex:
+            self._append(f"[ERROR][{self.active_brand}] Mở OCR log lỗi: {ex}")
 
     def _on_switch_brand(self, _event=None):
         selected = self.brand_var.get().strip()
@@ -348,19 +454,156 @@ class LiveShopeeManagerUI:
     def get_comment_async(self):
         self._run_async(self._get_comment_worker)
 
+    def _pick_screen_region(self) -> OCRRegion | None:
+        """Interactive region picker using fullscreen transparent overlay."""
+
+        picker = tk.Toplevel(self.root)
+        picker.attributes("-fullscreen", True)
+        picker.attributes("-alpha", 0.25)
+        picker.attributes("-topmost", True)
+        picker.configure(bg="black")
+
+        canvas = tk.Canvas(picker, bg="black", highlightthickness=0)
+        canvas.pack(fill="both", expand=True)
+
+        state = {"x1": 0, "y1": 0, "x2": 0, "y2": 0, "rect": None}
+
+        def on_press(event):
+            state["x1"], state["y1"] = int(event.x), int(event.y)
+            state["x2"], state["y2"] = int(event.x), int(event.y)
+            if state["rect"]:
+                canvas.delete(state["rect"])
+            state["rect"] = canvas.create_rectangle(
+                state["x1"],
+                state["y1"],
+                state["x2"],
+                state["y2"],
+                outline="red",
+                width=2,
+            )
+
+        def on_drag(event):
+            state["x2"], state["y2"] = int(event.x), int(event.y)
+            if state["rect"]:
+                canvas.coords(state["rect"], state["x1"], state["y1"], state["x2"], state["y2"])
+
+        def on_release(_event):
+            picker.destroy()
+
+        canvas.bind("<ButtonPress-1>", on_press)
+        canvas.bind("<B1-Motion>", on_drag)
+        canvas.bind("<ButtonRelease-1>", on_release)
+        picker.bind("<Escape>", lambda _e: picker.destroy())
+
+        self.root.wait_window(picker)
+
+        x1, y1, x2, y2 = state["x1"], state["y1"], state["x2"], state["y2"]
+        left, top = min(x1, x2), min(y1, y2)
+        width, height = abs(x2 - x1), abs(y2 - y1)
+        region = OCRRegion(x=left, y=top, width=width, height=height)
+        if not region.is_valid():
+            return None
+        return region
+
+    def select_ocr_region(self):
+        try:
+            region = self._pick_screen_region()
+            if not region:
+                self._append(f"[ERROR][{self.active_brand}] OCR region không hợp lệ hoặc đã huỷ")
+                return
+            self.comment_switch_service.set_ocr_region(self.active_brand, region)
+            self._append(
+                f"[SUCCESS][{self.active_brand}] Đã lưu OCR region x={region.x}, y={region.y}, w={region.width}, h={region.height}"
+            )
+        except Exception as ex:
+            self._append(f"[ERROR][{self.active_brand}] Chọn OCR region lỗi: {ex}")
+
+    def start_ocr(self):
+        try:
+            engine_status = self.comment_switch_service.get_ocr_engine_status()
+            log_path = self.comment_switch_service.ensure_ocr_log_file(self.active_brand)
+            region = self.comment_switch_service.get_ocr_region(self.active_brand)
+            self._append(f"[OCR-DEBUG][{self.active_brand}] engine_status={json.dumps(engine_status, ensure_ascii=False)}")
+            self._append(f"[OCR-DEBUG][{self.active_brand}] log_path={log_path}")
+            self._append(
+                f"[OCR-DEBUG][{self.active_brand}] region=x={region.x}, y={region.y}, w={region.width}, h={region.height}"
+            )
+
+            settings = OCRSettings(
+                interval_seconds=1.0,
+                min_confidence=0.80,
+                dedupe_same_user=bool(self.action_tabs.comment.dedupe_same_user_var.get()),
+                dedupe_window_seconds=45,
+            )
+
+            def _on_comment(comment):
+                try:
+                    payload = self.comment_switch_service.process_ocr_comment(
+                        brand_id=self.active_brand,
+                        comment=comment,
+                    )
+                    self._result_queue.put(("ocr_comment", self.active_brand, payload))
+                    return payload
+                except Exception as callback_ex:
+                    self._result_queue.put(("err", self.active_brand, f"OCR callback lỗi: {callback_ex}"))
+                    return {"action": "error", "note": str(callback_ex)}
+
+            started = self.comment_switch_service.start_ocr(
+                brand_id=self.active_brand,
+                settings=settings,
+                on_comment=_on_comment,
+            )
+            self.action_tabs.comment.set_ocr_status(self.comment_switch_service.is_ocr_running())
+            if not started:
+                self._append(f"[ERROR][{self.active_brand}] OCR chưa start. Hãy chọn region trước.")
+                return
+            self._append(f"[SUCCESS][{self.active_brand}] OCR started")
+        except Exception as ex:
+            self._append(f"[ERROR][{self.active_brand}] Start OCR lỗi: {ex}")
+
+    def stop_ocr(self):
+        try:
+            self.comment_switch_service.stop_ocr()
+            self.action_tabs.comment.set_ocr_status(False)
+            self._append(f"[SUCCESS][{self.active_brand}] OCR stopped")
+        except Exception as ex:
+            self._append(f"[ERROR][{self.active_brand}] Stop OCR lỗi: {ex}")
+
     def _get_comment_worker(self):
         brand_id = self.active_brand
         try:
             cfg = self._current_config()
-            result = self.service.get_comment(
-                cfg,
-                self.action_tabs.comment.session_id_var.get(),
-                self.action_tabs.comment.page_size_var.get(),
-                self.action_tabs.comment.cursor_var.get(),
+            result = self.comment_switch_service.run_comment_switch(
+                brand_id=brand_id,
+                cfg=cfg,
+                session_id=self.action_tabs.comment.session_id_var.get(),
+                page_size=self.action_tabs.comment.page_size_var.get(),
+                cursor=self.action_tabs.comment.cursor_var.get(),
+                enabled=bool(self.action_tabs.comment.enable_switch_var.get()),
+                source_type=self.action_tabs.comment.source_var.get(),
+                ocr_mode="ui_text",
+                ocr_file_path="",
+                ui_test_text=self.action_tabs.comment.test_comment_var.get(),
+                disable_ui_text=not bool(self.action_tabs.comment.use_ui_text_var.get()),
             )
             self._result_queue.put(("ok", brand_id, json.dumps(result, ensure_ascii=False, indent=2)))
         except Exception as ex:
             logger.exception("get_comment failed")
+            self._result_queue.put(("err", brand_id, str(ex)))
+
+    def test_comment_switch_async(self):
+        self._run_async(self._test_comment_switch_worker)
+
+    def _test_comment_switch_worker(self):
+        brand_id = self.active_brand
+        try:
+            result = self.comment_switch_service.run_test_comment_switch(
+                brand_id=brand_id,
+                test_comment=self.action_tabs.comment.test_comment_var.get(),
+            )
+            self._result_queue.put(("ok", brand_id, json.dumps(result, ensure_ascii=False, indent=2)))
+        except Exception as ex:
+            logger.exception("test_comment_switch failed")
             self._result_queue.put(("err", brand_id, str(ex)))
 
     def refresh_access_token_async(self):
@@ -535,10 +778,10 @@ class LiveShopeeManagerUI:
     def obs_remove_video(self):
         try:
             svc = self._obs_service(self.active_brand)
-            index = self.obs_panel.get_selected_playlist_index()
-            if index < 0:
+            video_id = self.obs_panel.get_selected_video_id().strip()
+            if not video_id:
                 raise ValueError("Vui lòng chọn video trong Queue 1")
-            svc.remove_from_play_queue(index)
+            svc.remove_from_play_queue(video_id)
             self.obs_panel.set_queue_state(svc.get_queue_state())
             self._append(f"[SUCCESS][{self.active_brand}] Đã remove video khỏi Queue 1")
         except Exception as ex:
@@ -547,12 +790,12 @@ class LiveShopeeManagerUI:
     def obs_move_up_video(self):
         try:
             svc = self._obs_service(self.active_brand)
-            index = self.obs_panel.get_selected_playlist_index()
-            if index < 0:
+            video_id = self.obs_panel.get_selected_video_id().strip()
+            if not video_id:
                 raise ValueError("Vui lòng chọn video trong Queue 1")
-            new_index = svc.move_play_queue_item(index, "up")
+            svc.move_play_queue_item(video_id, "up")
             self.obs_panel.set_queue_state(svc.get_queue_state())
-            self.obs_panel.set_selected_playlist_index(new_index)
+            self.obs_panel.set_selected_video_id(video_id)
             self._append(f"[SUCCESS][{self.active_brand}] Đã move up video")
         except Exception as ex:
             self._append(f"[ERROR][{self.active_brand}] Move up lỗi: {ex}")
@@ -560,12 +803,12 @@ class LiveShopeeManagerUI:
     def obs_move_down_video(self):
         try:
             svc = self._obs_service(self.active_brand)
-            index = self.obs_panel.get_selected_playlist_index()
-            if index < 0:
+            video_id = self.obs_panel.get_selected_video_id().strip()
+            if not video_id:
                 raise ValueError("Vui lòng chọn video trong Queue 1")
-            new_index = svc.move_play_queue_item(index, "down")
+            svc.move_play_queue_item(video_id, "down")
             self.obs_panel.set_queue_state(svc.get_queue_state())
-            self.obs_panel.set_selected_playlist_index(new_index)
+            self.obs_panel.set_selected_video_id(video_id)
             self._append(f"[SUCCESS][{self.active_brand}] Đã move down video")
         except Exception as ex:
             self._append(f"[ERROR][{self.active_brand}] Move down lỗi: {ex}")
@@ -577,3 +820,31 @@ class LiveShopeeManagerUI:
             self._append(f"[SUCCESS][{self.active_brand}] Đã yêu cầu skip video hiện tại")
         except Exception as ex:
             self._append(f"[ERROR][{self.active_brand}] Skip video lỗi: {ex}")
+
+    def obs_prioritize_video(self):
+        try:
+            svc = self._obs_service(self.active_brand)
+            video_id = self.obs_panel.playlist_component.priority_id_var.get().strip()
+            if not video_id:
+                raise ValueError("Vui lòng nhập Priority ID")
+            svc.prioritize_video_by_id(video_id)
+            self.obs_panel.set_queue_state(svc.get_queue_state())
+            self._append(f"[SUCCESS][{self.active_brand}] Đã ưu tiên video ID: {video_id}")
+        except Exception as ex:
+            self._append(f"[ERROR][{self.active_brand}] Prioritize lỗi: {ex}")
+
+    def obs_set_video_cooldown(self):
+        try:
+            svc = self._obs_service(self.active_brand)
+            video_id = self.obs_panel.playlist_component.cooldown_id_var.get().strip()
+            if not video_id:
+                raise ValueError("Vui lòng nhập Cooldown ID")
+            seconds_text = self.obs_panel.playlist_component.cooldown_seconds_var.get().strip()
+            seconds = int(float(seconds_text or "0"))
+            if seconds < 0:
+                raise ValueError("Cooldown phải >= 0")
+            svc.set_video_cooldown(video_id, seconds)
+            self.obs_panel.set_queue_state(svc.get_queue_state())
+            self._append(f"[SUCCESS][{self.active_brand}] Set cooldown {seconds}s cho ID: {video_id}")
+        except Exception as ex:
+            self._append(f"[ERROR][{self.active_brand}] Set cooldown lỗi: {ex}")

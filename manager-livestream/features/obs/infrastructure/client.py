@@ -70,6 +70,19 @@ class OBSWebSocketClient:
     def set_source_visibility(self, scene_name: str, source_name: str, visible: bool):
         if self._client is None:
             raise RuntimeError("OBS chưa connect")
+        scene_item_id = self._find_scene_item_id(scene_name, source_name)
+        self._client.set_scene_item_enabled(scene_name, int(scene_item_id), bool(visible))
+
+    def set_source_order(self, scene_name: str, source_name: str, index: int):
+        """Set scene item order (0 is topmost in OBS)."""
+        if self._client is None:
+            raise RuntimeError("OBS chưa connect")
+        scene_item_id = self._find_scene_item_id(scene_name, source_name)
+        self._client.set_scene_item_index(scene_name, int(scene_item_id), int(index))
+
+    def _find_scene_item_id(self, scene_name: str, source_name: str) -> int:
+        if self._client is None:
+            raise RuntimeError("OBS chưa connect")
         resp = self._client.get_scene_item_list(scene_name)
         items = getattr(resp, "scene_items", []) or []
         scene_item_id = None
@@ -80,7 +93,7 @@ class OBSWebSocketClient:
                 break
         if scene_item_id is None:
             raise RuntimeError(f"Không tìm thấy source '{source_name}' trong scene '{scene_name}'")
-        self._client.set_scene_item_enabled(scene_name, int(scene_item_id), bool(visible))
+        return int(scene_item_id)
 
     def set_media_local_file(self, input_name: str, file_path: str):
         if self._client is None:

@@ -60,9 +60,14 @@ manager-livestream/
 
 ```bash
 python -m pip install -U pip
+python -m pip install -r manager-livestream/requirements.txt
 ```
 
-(Project hiện dùng thư viện chuẩn Python, chưa có dependency ngoài bắt buộc.)
+### OCR runtime note (quan trọng)
+
+- `pytesseract` là Python wrapper, bạn cần cài thêm **Tesseract OCR binary** ở hệ điều hành.
+- Để đọc tiếng Việt tốt, cần cài language pack `vie` cho Tesseract.
+- Nếu thiếu Tesseract hoặc thiếu `vie`, app vẫn chạy nhưng OCR có thể không ra text.
 
 ### 1) Chạy UI livestream trực tiếp
 
@@ -103,6 +108,90 @@ Hệ thống hỗ trợ nhiều brand độc lập:
 
 - Nếu trước đây chỉ có `.env`, hệ thống sẽ tự migrate sang `envs/default.env` lần đầu chạy.
 
+## OBS Queue ID/Cooldown (mới)
+
+Hệ thống OBS đã hỗ trợ queue theo **video ID** + **cooldown** + **ưu tiên phát theo ID**.
+
+### UI flow
+
+Trong tab **OBS**:
+
+1. Vào `Scene & Sources`:
+   - Chọn `Scene`
+   - Chọn `Video Source A` và `Video Source B`
+   - Cấu hình:
+     - `Crossfade (s)`
+     - `Cooldown mặc định (s)`
+2. Vào `Playlist`:
+   - Chọn thư mục video và `Import`
+   - Queue 1 sẽ hiển thị dạng: `ID | tên_file`
+3. Điều khiển queue:
+   - `Move Up/Move Down/Remove` thao tác theo ID đã chọn trong Queue 1
+   - `Priority ID` + `Prioritize`: đẩy video ID lên ưu tiên phát kế tiếp (Queue 2)
+   - `Cooldown ID` + số giây + `Set Cooldown`: override cooldown riêng cho từng video
+
+### Lưu trữ dữ liệu OBS theo brand
+
+Mỗi brand có dữ liệu OBS riêng, nằm tại:
+
+- `data/brands/<brand_id>/obs/config.json`
+- `data/brands/<brand_id>/obs/video_catalog.json`
+
+`video_catalog.json` chứa:
+
+- `id_counter`: bộ đếm sinh ID (`V0001`, `V0002`, ...)
+- `videos`: mapping ID -> path + cooldown metadata
+- `priority_ids`: danh sách ID đang được ưu tiên
+
+### Cách ly brand/env (quan trọng)
+
+- Mỗi `OBSService` được khởi tạo theo `brand_id`.
+- Catalog video và queue state được load/save theo đúng thư mục brand đó.
+- ID của brand A không thể được resolve trong brand B.
+
+## Public API cho feature khác (ưu tiên phát theo ID)
+
+Bạn có thể gọi trực tiếp từ module/feature khác (không cần đi qua UI):
+
+```python
+from features.obs import (
+    enqueue_priority_video,
+    set_video_cooldown_by_id,
+    get_video_catalog,
+)
+
+brand_id = "default"
+
+# 1) Lấy catalog ID hiện có
+catalog = get_video_catalog(brand_id)
+
+# 2) Ưu tiên phát 1 ID
+result = enqueue_priority_video(
+    brand_id=brand_id,
+    video_id="V0007",
+    source="my_feature",
+
+
+    
+    trace_id="req-123",
+)
+
+# 3) Override cooldown cho 1 ID
+set_video_cooldown_by_id(
+    brand_id=brand_id,
+    video_id="V0007",
+    cooldown_seconds=180,
+    source="my_feature",
+    trace_id="req-124",
+)
+```
+
+### API contract gợi ý
+
+- Truyền `brand_id` rõ ràng cho mọi call cross-feature.
+- Khuyến nghị gắn `source` và `trace_id` để debug/tracing dễ hơn.
+- Nếu ID không tồn tại trong brand hiện tại, API sẽ raise lỗi để chặn nhầm môi trường.
+
 ## Lưu ý bảo mật
 
 - Không commit token/partner key lên git.
@@ -129,5 +218,7 @@ Hệ thống hỗ trợ nhiều brand độc lập:
 - UI đã được tách thành component để dễ mở rộng và test.
 - Các message/lỗi tập trung tại `shared/messages.py`.
 - Hạn chế đặt logic nghiệp vụ trong UI; business logic nằm ở `features/livestream/service.py`.
+
+
 
 
