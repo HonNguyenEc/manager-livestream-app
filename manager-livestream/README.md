@@ -2,6 +2,41 @@
 
 Ứng dụng desktop (Tkinter) để quản lý Shopee Livestream theo mô hình module, hỗ trợ multi-brand (mỗi brand có env và data riêng).
 
+## New Chat Mandatory Rule Loading (Required)
+
+When starting a **new chat/session** with Cline or any API-based coding agent, you must require the agent to read and apply the full rule set before handling any task.
+
+### Mandatory files to load first
+- `.cline/rules/00-core-rules.md`
+- `.cline/rules/10-architecture.md`
+- `.cline/rules/20-ui-rules.md`
+- `.cline/rules/30-refactor-safety.md`
+- `.cline/rules/40-testing-and-quality.md`
+- `.cline/rules/50-performance-and-security.md`
+- `prompts/system_prompt_for_api.md`
+- `prompts/task_template.md`
+- `prompts/new_chat_mandatory_context.md`
+- `docs/project-structure.md`
+- `docs/review-checklist.md`
+- `cline_ruleset_full.md`
+
+### Start New Chat Checklist
+1. Paste the content from `prompts/new_chat_mandatory_context.md` as the first message.
+2. Ask the agent to confirm it has read all required rule files.
+3. Only then provide the implementation task.
+
+### Quick copy block (first message in a new chat)
+```text
+Before doing any task, you must read and apply all governance files in this repository:
+- .cline/rules/*
+- prompts/*
+- docs/*
+- cline_ruleset_full.md
+
+Then summarize the consolidated execution policy you will follow.
+Do not implement anything until this confirmation is done.
+```
+
 ## Mục tiêu kiến trúc
 
 Project được tách theo hướng **module-based** để giảm phụ thuộc chéo:
@@ -13,6 +48,16 @@ Project được tách theo hướng **module-based** để giảm phụ thuộc
 - Dữ liệu runtime nằm ở thư mục `data/`.
 
 ## Cấu trúc thư mục
+- `.cline/rules/00-core-rules.md`: rule nền tảng bắt buộc
+- `.cline/rules/10-architecture.md`: rule kiến trúc và module hóa
+- `.cline/rules/20-ui-rules.md`: rule tách UI component
+- `.cline/rules/30-refactor-safety.md`: rule sửa code an toàn
+- `.cline/rules/40-testing-and-quality.md`: rule test, quality, logging
+- `.cline/rules/50-performance-and-security.md`: rule hiệu năng và an toàn
+- `docs/project-structure.md`: cấu trúc thư mục khuyến nghị
+- `docs/review-checklist.md`: checklist review trước khi merge
+- `prompts/system_prompt_for_api.md`: prompt tổng cho API-based coding agent
+- `prompts/task_template.md`: mẫu prompt giao task cho agent
 
 ```text
 manager-livestream/
@@ -218,6 +263,7 @@ set_video_cooldown_by_id(
 - UI đã được tách thành component để dễ mở rộng và test.
 - Các message/lỗi tập trung tại `shared/messages.py`.
 - Hạn chế đặt logic nghiệp vụ trong UI; business logic nằm ở `features/livestream/service.py`.
+
 
 
 
