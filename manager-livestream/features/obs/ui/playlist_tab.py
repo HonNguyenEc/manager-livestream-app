@@ -99,7 +99,7 @@ class OBSPlaylistTab:
         ttk.Button(qa_folder_row, text="Browse", command=on_choose_qa_folder).pack(side="left", padx=(0, 6))
         ttk.Button(qa_folder_row, text="Import QA", command=on_import_qa).pack(side="left")
 
-        qa_list_frame = ttk.LabelFrame(self.frame, text="QA Videos (chỉ phát khi được gọi)")
+        qa_list_frame = ttk.LabelFrame(self.frame, text="QA Videos")
         qa_list_frame.grid(row=7, column=0, columnspan=4, sticky="nsew", pady=(4, 0))
 
         self.qa_listbox = tk.Listbox(qa_list_frame, height=6)

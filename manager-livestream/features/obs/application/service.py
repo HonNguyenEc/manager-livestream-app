@@ -4,6 +4,7 @@ import threading
 import time
 from pathlib import Path
 
+from shared.logger import get_logger
 from features.obs.domain.models import OBSConfig
 from features.obs.infrastructure.client import OBSWebSocketClient
 from features.obs.infrastructure.repository import OBSConfigRepository
@@ -37,7 +38,9 @@ class OBSService:
         }
         self._ready_size = 3
         self._next_index = 0
+        self._log = get_logger("obs.runner")
         self._load_catalog()
+        self._log.passed(f"Initialized brand={brand_id} rotate={len(self._import_queue)} qa={len(self._qa_queue)}")  # type: ignore[attr-defined]
 
     def load_config(self) -> OBSConfig:
         return self.repo.load()
@@ -157,6 +160,7 @@ class OBSService:
                     }
                 )
             self._save_catalog_locked()
+        self._log.info(f"Imported {len(files)} QA videos from {folder}")
         return len(files)
 
     def remove_qa_video(self, video_id: str):
@@ -232,6 +236,7 @@ class OBSService:
                 )
             self._sync_ready_queue_locked()
             self._save_catalog_locked()
+        self._log.info(f"Imported {len(files)} rotate videos from {folder}")
         return len(files)
 
     def clear_queues(self):
@@ -293,6 +298,7 @@ class OBSService:
             self._priority_ids.insert(0, video_id)
             self._sync_ready_queue_locked()
             self._save_catalog_locked()
+        self._log.info(f"Priority set: {video_id}")
 
     def set_video_cooldown(self, video_id: str, cooldown_seconds: int):
         with self._lock:
@@ -428,6 +434,7 @@ class OBSService:
 
     def _play_to_slot(self, cfg: OBSConfig, slot: str, item: dict):
         file_path = str(item.get("path", ""))
+        self._log.info(f"Playing slot={slot} id={item.get('id')} file={Path(file_path).name}")
         source = self._source_of(cfg, slot)
         other_slot = "B" if slot == "A" else "A"
         other_source = self._source_of(cfg, other_slot)
@@ -445,6 +452,7 @@ class OBSService:
 
     def _prepare_slot(self, cfg: OBSConfig, slot: str, item: dict):
         file_path = str(item.get("path", ""))
+        self._log.info(f"Prepare slot={slot} id={item.get('id')} file={Path(file_path).name}")
         source = self._source_of(cfg, slot)
         self.client.set_media_local_file(source, file_path)
         self.client.set_source_visibility(cfg.scene_name, source, False)
@@ -468,10 +476,12 @@ class OBSService:
         """Replace standby slot với priority item nếu priority thay đổi."""
         with self._lock:
             should = self._should_reprepare_standby_locked(standby)
+            old_id = (self._slots[standby]["item"] or {}).get("id")
         if not should:
             return
         next_item = self._next_from_play_queue()
         if next_item:
+            self._log.info(f"Re-prepare standby={standby}: {old_id} → {next_item.get('id')}")
             self._prepare_slot(cfg, standby, next_item)
 
     def _hide_slot(self, cfg: OBSConfig, slot: str):
@@ -501,6 +511,7 @@ class OBSService:
             self._reset_slots()
             self._runner_thread = threading.Thread(target=self._runner_loop, args=(cfg,), daemon=True)
             self._runner_thread.start()
+        self._log.info("Runner started")
 
     def stop_queue_runner(self):
         self._runner_stop.set()
@@ -508,6 +519,7 @@ class OBSService:
         if t and t.is_alive():
             t.join(timeout=1.2)
         self._runner_thread = None
+        self._log.info("Runner stopped")
 
     def _runner_loop(self, cfg: OBSConfig):
         try:
@@ -568,6 +580,7 @@ class OBSService:
 
             except Exception as ex:
                 self._last_error = str(ex)
+                self._log.error(f"Runner error: {ex}")
             time.sleep(0.15)
 
         try:

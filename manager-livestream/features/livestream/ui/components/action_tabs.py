@@ -6,6 +6,7 @@ from datetime import datetime
 
 from features.livestream.config import AppConfig
 from features.livestream.ui.components.comment_setup_tab import CommentSetupTab
+from features.livestream.ui.components.debug_tab import DebugTab
 
 
 class CreateSessionTab:
@@ -273,11 +274,13 @@ class ActionTabs:
             on_open_qa_mapping_csv=on_open_qa_mapping_csv,
             on_shown=on_comment_setup_shown,
         )
+        self.debug = DebugTab(notebook)
 
         notebook.add(self.create.frame, text="Create Session")
         notebook.add(self.end.frame, text="End Session")
         notebook.add(self.comment.frame, text="Get Comments")
         notebook.add(self.comment_setup.frame, text="Comment Setup")
+        notebook.add(self.debug.frame, text="Debug")
 
     def set_values(self, cfg: AppConfig):
         self.create.set_values(cfg)

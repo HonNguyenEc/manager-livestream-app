@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from shared.logger import get_logger
 from features.livestream.application.comment_reader import CommentReader
 from features.livestream.application.comment_video_mapper import CommentVideoMapper
 from features.livestream.application.ocr import OCRComment, OCRRegion, OCRRunner, OCRSettings
@@ -17,6 +18,9 @@ class CommentSwitchService:
         self.reader = CommentReader()
         self.mapper = CommentVideoMapper()
         self.ocr_runner = OCRRunner()
+        self._log = get_logger("comment.switch")
+        self._log.passed("CommentSwitchService ready")  # type: ignore[attr-defined]
+        get_logger("comment.mapper").passed("CommentVideoMapper ready")  # type: ignore[attr-defined]
 
     def _ocr_region_path(self, brand_id: str):
         from features.livestream.config import ensure_brand_data_dir
@@ -74,7 +78,7 @@ class CommentSwitchService:
 
     def process_ocr_comment(self, *, brand_id: str, comment: OCRComment) -> dict:
         """Map one OCR comment to video and enqueue priority if matched."""
-
+        self._log.info(f"OCR comment [{comment.author}]: {comment.content_normalized}")
         comments = [comment.content_normalized]
 
         # Check QA CSV first
@@ -105,10 +109,12 @@ class CommentSwitchService:
             "action": "pending",
         }
         if not video_id:
+            self._log.info(f"No match: {comment.content_normalized}")
             result["note"] = "OCR comment chưa match sản phẩm trong CSV mapping."
             result["action"] = "no_match"
             return result
 
+        self._log.info(f"Matched {video_id} ({'qa' if matched_qa else 'rotate'})")
         enqueue_result = enqueue_priority_video(
             brand_id=brand_id,
             video_id=video_id,

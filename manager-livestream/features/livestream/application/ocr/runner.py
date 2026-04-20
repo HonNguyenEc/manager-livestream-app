@@ -8,6 +8,7 @@ from dataclasses import asdict
 from typing import Callable
 
 from features.livestream.config import ensure_brand_data_dir
+from shared.logger import get_logger
 
 from .capture_service import OCRCaptureService
 from .dedupe_service import OCRDedupeService
@@ -31,6 +32,12 @@ class OCRRunner:
 
         self._running = False
         self._thread: threading.Thread | None = None
+        self._log = get_logger("ocr.runner")
+        status = self.reader_service.check_engine()
+        if status.get("ok"):
+            self._log.passed(f"Tesseract ready version={status.get('version', '?')}")  # type: ignore[attr-defined]
+        else:
+            self._log.error(f"Tesseract not available — {status.get('reason', '')} {status.get('error', '')}")
 
     def is_running(self) -> bool:
         return bool(self._running)
@@ -52,6 +59,7 @@ class OCRRunner:
             return False
 
         self._running = True
+        self._log.info(f"OCR started brand={brand_id} region={region}")
         self._thread = threading.Thread(
             target=self._run_loop,
             kwargs={
@@ -67,6 +75,7 @@ class OCRRunner:
 
     def stop(self):
         self._running = False
+        self._log.info("OCR stopped")
 
     def _run_loop(self, *, brand_id: str, region: OCRRegion, settings: OCRSettings, on_comment: Callable[[OCRComment], dict | None]):
         log_path = ensure_brand_data_dir(brand_id) / "obs" / "ocr_comment_log.json"
@@ -92,6 +101,7 @@ class OCRRunner:
                         # Duplicate comments are intentionally suppressed from logs.
                         continue
 
+                    self._log.info(f"Comment [{c.author}]: {c.content_normalized}")
                     self.log_service.append_event(
                         log_path,
                         {
@@ -122,7 +132,6 @@ class OCRRunner:
                         )
 
             except Exception as ex:
-                # Keep OCR loop alive even if one iteration fails. Skip noisy logs.
-                _ = ex
+                self._log.error(f"OCR loop error: {ex}")
 
             time.sleep(max(0.3, float(settings.interval_seconds or 1.0)))

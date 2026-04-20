@@ -8,6 +8,9 @@ import unicodedata
 from pathlib import Path
 
 from features.livestream.config import ensure_brand_data_dir
+from shared.logger import get_logger
+
+_log = get_logger("comment.mapper")
 
 
 def normalize_text(value: str) -> str:
@@ -196,11 +199,14 @@ class CommentVideoMapper:
                     best_stt = stt
 
         if not best_stt or best_score == 0:
+            _log.info(f"QA: no match for {comments}")
             return None
 
-        stt_int = int(best_stt) - 1  # convert to 0-based index
+        stt_int = int(best_stt) - 1
         if 0 <= stt_int < len(qa_catalog):
-            return str(qa_catalog[stt_int].get("id", ""))
+            matched_id = str(qa_catalog[stt_int].get("id", ""))
+            _log.info(f"QA match: {matched_id} (stt={best_stt} score={best_score})")
+            return matched_id
         return None
 
     def resolve_video_id_from_comments(self, comments: list[str], mapping_csv_path: Path) -> str | None:
@@ -230,4 +236,8 @@ class CommentVideoMapper:
                     best_score = final_score
                     best_video_id = video_id
 
-        return best_video_id if best_score > 0 else None
+        if best_video_id and best_score > 0:
+            _log.info(f"Rotate match: {best_video_id} score={best_score}")
+            return best_video_id
+        _log.info(f"Rotate: no match for {comments}")
+        return None
