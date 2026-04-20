@@ -450,6 +450,30 @@ class OBSService:
         self.client.set_source_visibility(cfg.scene_name, source, False)
         self._slots[slot] = {"file": file_path, "item": item, "started": False, "prepared": True}
 
+    def _should_reprepare_standby_locked(self, standby: str) -> bool:
+        """True nếu standby slot nên bị replace bởi item priority cao hơn.
+
+        Placeholder: hiện tại trigger khi top priority_id khác prepared item.
+        Future: so sánh priority score để quyết định eviction.
+        """
+        slot = self._slots[standby]
+        if not slot["prepared"] or slot["started"]:
+            return False
+        if not self._priority_ids:
+            return False
+        prepared_id = (slot["item"] or {}).get("id")
+        return self._priority_ids[0] != prepared_id
+
+    def _reprepare_standby_if_needed(self, cfg: OBSConfig, standby: str) -> None:
+        """Replace standby slot với priority item nếu priority thay đổi."""
+        with self._lock:
+            should = self._should_reprepare_standby_locked(standby)
+        if not should:
+            return
+        next_item = self._next_from_play_queue()
+        if next_item:
+            self._prepare_slot(cfg, standby, next_item)
+
     def _hide_slot(self, cfg: OBSConfig, slot: str):
         source = self._source_of(cfg, slot)
         self.client.set_source_visibility(cfg.scene_name, source, False)
@@ -500,6 +524,7 @@ class OBSService:
                 active = self._active_slot
                 standby = "B" if active == "A" else "A"
                 active_source = self._source_of(cfg, active)
+                self._reprepare_standby_if_needed(cfg, standby)
 
                 if not self._slots[active]["started"]:
                     next_item = self._next_from_play_queue()

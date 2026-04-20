@@ -5,6 +5,7 @@ from tkinter import ttk
 from datetime import datetime
 
 from features.livestream.config import AppConfig
+from features.livestream.ui.components.comment_setup_tab import CommentSetupTab
 
 
 class CreateSessionTab:
@@ -72,8 +73,6 @@ class CommentTab:
         parent,
         on_get_comment,
         on_test_run,
-        on_open_mapping_csv,
-        on_open_qa_mapping_csv,
         on_open_ocr_log,
         on_select_ocr_region,
         on_start_ocr,
@@ -131,8 +130,6 @@ class CommentTab:
         action_row.grid(row=7, column=1, sticky="w", pady=8)
         ttk.Button(action_row, text="Run Switch", command=on_get_comment).pack(side="left")
         ttk.Button(action_row, text="Test Convert", command=on_test_run).pack(side="left", padx=(6, 6))
-        ttk.Button(action_row, text="Open Mapping CSV", command=on_open_mapping_csv).pack(side="left")
-        ttk.Button(action_row, text="Open QA Mapping CSV", command=on_open_qa_mapping_csv).pack(side="left", padx=(6, 0))
         ttk.Button(action_row, text="Open OCR Log", command=on_open_ocr_log).pack(side="left", padx=(6, 0))
 
         ocr_row = ttk.Frame(self.frame)
@@ -254,6 +251,7 @@ class ActionTabs:
         on_select_ocr_region,
         on_start_ocr,
         on_stop_ocr,
+        on_comment_setup_shown=None,
     ):
         notebook = ttk.Notebook(parent)
         notebook.pack(fill="x", pady=(10, 10))
@@ -264,17 +262,22 @@ class ActionTabs:
             notebook,
             on_get_comment,
             on_test_comment_switch,
-            on_open_mapping_csv,
-            on_open_qa_mapping_csv,
             on_open_ocr_log,
             on_select_ocr_region,
             on_start_ocr,
             on_stop_ocr,
         )
+        self.comment_setup = CommentSetupTab(
+            notebook,
+            on_open_mapping_csv=on_open_mapping_csv,
+            on_open_qa_mapping_csv=on_open_qa_mapping_csv,
+            on_shown=on_comment_setup_shown,
+        )
 
         notebook.add(self.create.frame, text="Create Session")
         notebook.add(self.end.frame, text="End Session")
         notebook.add(self.comment.frame, text="Get Comments")
+        notebook.add(self.comment_setup.frame, text="Comment Setup")
 
     def set_values(self, cfg: AppConfig):
         self.create.set_values(cfg)

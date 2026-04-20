@@ -124,6 +124,7 @@ class LiveShopeeManagerUI:
             on_open_mapping_csv=self.open_mapping_csv,
             on_open_qa_mapping_csv=self.open_qa_mapping_csv,
             on_open_ocr_log=self.open_ocr_log,
+            on_comment_setup_shown=self._refresh_comment_setup_tab,
             on_select_ocr_region=self.select_ocr_region,
             on_start_ocr=self.start_ocr,
             on_stop_ocr=self.stop_ocr,
@@ -341,24 +342,35 @@ class LiveShopeeManagerUI:
             brand_id = self.active_brand
             catalog = self._obs_service(brand_id).get_video_catalog()
             mapping_path = self.comment_switch_service.mapper.ensure_mapping_csv(brand_id, catalog)
-
             _open_file(str(mapping_path))
-
             self._append(f"[SUCCESS][{brand_id}] Đã mở file mapping CSV: {mapping_path}")
         except Exception as ex:
             self._append(f"[ERROR][{self.active_brand}] Mở mapping CSV lỗi: {ex}")
+        finally:
+            self._refresh_comment_setup_tab()
 
     def open_qa_mapping_csv(self):
         try:
             brand_id = self.active_brand
             qa_catalog = self._obs_service(brand_id).get_qa_catalog()
             qa_path = self.comment_switch_service.mapper.ensure_qa_mapping_csv(brand_id, qa_catalog)
-
             _open_file(str(qa_path))
-
             self._append(f"[SUCCESS][{brand_id}] Đã mở QA mapping CSV: {qa_path}")
         except Exception as ex:
             self._append(f"[ERROR][{self.active_brand}] Mở QA mapping CSV lỗi: {ex}")
+        finally:
+            self._refresh_comment_setup_tab()
+
+    def _refresh_comment_setup_tab(self):
+        try:
+            brand_id = self.active_brand
+            svc = self._obs_service(brand_id)
+            mapper = self.comment_switch_service.mapper
+            rotate_path = mapper.ensure_mapping_csv(brand_id, svc.get_video_catalog())
+            qa_path = mapper.ensure_qa_mapping_csv(brand_id, svc.get_qa_catalog())
+            self.action_tabs.comment_setup.refresh(rotate_path, qa_path)
+        except Exception:
+            pass
 
     def open_ocr_log(self):
         try:
