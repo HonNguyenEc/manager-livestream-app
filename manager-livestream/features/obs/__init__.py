@@ -3,6 +3,7 @@
 from features.obs.application.public_api import (
     enqueue_priority_video,
     get_obs_service,
+    get_qa_video_catalog,
     get_video_catalog,
     set_video_cooldown_by_id,
 )
@@ -18,4 +19,5 @@ __all__ = [
     "enqueue_priority_video",
     "set_video_cooldown_by_id",
     "get_video_catalog",
+    "get_qa_video_catalog",
 ]

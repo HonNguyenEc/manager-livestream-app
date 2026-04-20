@@ -33,3 +33,6 @@ data/brand_state.json
 
 # Logs
 *.log
+
+# Local overrides
+features/obs/__init__.py

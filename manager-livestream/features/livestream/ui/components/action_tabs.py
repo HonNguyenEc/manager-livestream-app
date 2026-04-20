@@ -73,6 +73,7 @@ class CommentTab:
         on_get_comment,
         on_test_run,
         on_open_mapping_csv,
+        on_open_qa_mapping_csv,
         on_open_ocr_log,
         on_select_ocr_region,
         on_start_ocr,
@@ -131,6 +132,7 @@ class CommentTab:
         ttk.Button(action_row, text="Run Switch", command=on_get_comment).pack(side="left")
         ttk.Button(action_row, text="Test Convert", command=on_test_run).pack(side="left", padx=(6, 6))
         ttk.Button(action_row, text="Open Mapping CSV", command=on_open_mapping_csv).pack(side="left")
+        ttk.Button(action_row, text="Open QA Mapping CSV", command=on_open_qa_mapping_csv).pack(side="left", padx=(6, 0))
         ttk.Button(action_row, text="Open OCR Log", command=on_open_ocr_log).pack(side="left", padx=(6, 0))
 
         ocr_row = ttk.Frame(self.frame)
@@ -247,6 +249,7 @@ class ActionTabs:
         on_get_comment,
         on_test_comment_switch,
         on_open_mapping_csv,
+        on_open_qa_mapping_csv,
         on_open_ocr_log,
         on_select_ocr_region,
         on_start_ocr,
@@ -262,6 +265,7 @@ class ActionTabs:
             on_get_comment,
             on_test_comment_switch,
             on_open_mapping_csv,
+            on_open_qa_mapping_csv,
             on_open_ocr_log,
             on_select_ocr_region,
             on_start_ocr,

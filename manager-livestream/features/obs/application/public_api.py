@@ -54,3 +54,8 @@ def set_video_cooldown_by_id(brand_id: str, video_id: str, cooldown_seconds: int
 def get_video_catalog(brand_id: str) -> list[dict]:
     """Get persistent brand-scoped video catalog."""
     return get_obs_service(brand_id).get_video_catalog()
+
+
+def get_qa_video_catalog(brand_id: str) -> list[dict]:
+    """Get persistent brand-scoped QA video catalog."""
+    return get_obs_service(brand_id).get_qa_catalog()

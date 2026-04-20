@@ -6,7 +6,7 @@ from features.livestream.application.comment_reader import CommentReader
 from features.livestream.application.comment_video_mapper import CommentVideoMapper
 from features.livestream.application.ocr import OCRComment, OCRRegion, OCRRunner, OCRSettings
 from features.livestream.config import AppConfig
-from features.obs import enqueue_priority_video, get_video_catalog
+from features.obs import enqueue_priority_video, get_video_catalog, get_qa_video_catalog
 from shared.storage import read_json, write_json
 
 
@@ -75,9 +75,21 @@ class CommentSwitchService:
     def process_ocr_comment(self, *, brand_id: str, comment: OCRComment) -> dict:
         """Map one OCR comment to video and enqueue priority if matched."""
 
-        catalog = get_video_catalog(brand_id)
-        mapping_path = self.mapper.ensure_mapping_csv(brand_id, catalog)
-        video_id = self.mapper.resolve_video_id_from_comments([comment.content_normalized], mapping_path)
+        comments = [comment.content_normalized]
+
+        # Check QA CSV first
+        qa_catalog = get_qa_video_catalog(brand_id)
+        qa_mapping_path = self.mapper.ensure_qa_mapping_csv(brand_id, qa_catalog)
+        video_id = self.mapper.resolve_qa_video_id_from_comments(comments, qa_mapping_path, qa_catalog)
+        matched_qa = bool(video_id)
+
+        # Fall back to rotate CSV if no QA match
+        if not video_id:
+            catalog = get_video_catalog(brand_id)
+            mapping_path = self.mapper.ensure_mapping_csv(brand_id, catalog)
+            video_id = self.mapper.resolve_video_id_from_comments(comments, mapping_path)
+        else:
+            mapping_path = qa_mapping_path
 
         result = {
             "mode": "ocr_auto",
@@ -88,6 +100,7 @@ class CommentSwitchService:
             "confidence": comment.confidence,
             "mapping_csv": str(mapping_path),
             "matched_video_id": video_id,
+            "matched_qa": matched_qa,
             "enqueued": False,
             "action": "pending",
         }
@@ -99,7 +112,7 @@ class CommentSwitchService:
         enqueue_result = enqueue_priority_video(
             brand_id=brand_id,
             video_id=video_id,
-            source="comment_switch_ocr",
+            source="comment_switch_ocr_qa" if matched_qa else "comment_switch_ocr",
             trace_id="comment-switch-ocr",
         )
         result["enqueued"] = True
@@ -134,8 +147,12 @@ class CommentSwitchService:
             disable_ui_text=disable_ui_text,
         )
         comments = list(read_result.comments or [])
+
+        # QA CSV first, fall back to rotate CSV
+        qa_catalog = get_qa_video_catalog(brand_id)
+        qa_mapping_path = self.mapper.ensure_qa_mapping_csv(brand_id, qa_catalog)
         catalog = get_video_catalog(brand_id)
-        mapping_path = self.mapper.ensure_mapping_csv(brand_id, catalog)
+        rotate_mapping_path = self.mapper.ensure_mapping_csv(brand_id, catalog)
 
         result = {
             "mode": "comment_api_stub",
@@ -146,16 +163,22 @@ class CommentSwitchService:
             "ocr_mode": str(ocr_mode or "ui_text"),
             "disable_ui_text": bool(disable_ui_text),
             "comments_count": len(comments),
-            "mapping_csv": str(mapping_path),
+            "mapping_csv": str(rotate_mapping_path),
             "matched_video_id": None,
+            "matched_qa": False,
             "enqueued": False,
         }
         if not enabled:
             result["note"] = "Comment switch đang tắt (Enable = false), chỉ cập nhật CSV mapping."
             return result
 
-        video_id = self.mapper.resolve_video_id_from_comments(comments, mapping_path)
+        video_id = self.mapper.resolve_qa_video_id_from_comments(comments, qa_mapping_path, qa_catalog)
+        matched_qa = bool(video_id)
+        if not video_id:
+            video_id = self.mapper.resolve_video_id_from_comments(comments, rotate_mapping_path)
+
         result["matched_video_id"] = video_id
+        result["matched_qa"] = matched_qa
         if not video_id:
             result["note"] = (
                 "Không match được video_id từ comment. "
@@ -166,7 +189,7 @@ class CommentSwitchService:
         enqueue_result = enqueue_priority_video(
             brand_id=brand_id,
             video_id=video_id,
-            source="comment_switch",
+            source="comment_switch_qa" if matched_qa else "comment_switch",
             trace_id="comment-switch-auto",
         )
         result["enqueued"] = True
@@ -175,15 +198,26 @@ class CommentSwitchService:
 
     def run_test_comment_switch(self, *, brand_id: str, test_comment: str) -> dict:
         comments = [str(test_comment or "").strip()]
-        catalog = get_video_catalog(brand_id)
-        mapping_path = self.mapper.ensure_mapping_csv(brand_id, catalog)
 
-        video_id = self.mapper.resolve_video_id_from_comments(comments, mapping_path)
+        # QA check first
+        qa_catalog = get_qa_video_catalog(brand_id)
+        qa_mapping_path = self.mapper.ensure_qa_mapping_csv(brand_id, qa_catalog)
+        video_id = self.mapper.resolve_qa_video_id_from_comments(comments, qa_mapping_path, qa_catalog)
+        matched_qa = bool(video_id)
+
+        if not video_id:
+            catalog = get_video_catalog(brand_id)
+            mapping_path = self.mapper.ensure_mapping_csv(brand_id, catalog)
+            video_id = self.mapper.resolve_video_id_from_comments(comments, mapping_path)
+        else:
+            mapping_path = qa_mapping_path
+
         result = {
             "mode": "test_run",
             "input_comment": comments[0] if comments else "",
             "mapping_csv": str(mapping_path),
             "matched_video_id": video_id,
+            "matched_qa": matched_qa,
             "enqueued": False,
         }
         if not video_id:
@@ -196,7 +230,7 @@ class CommentSwitchService:
         enqueue_result = enqueue_priority_video(
             brand_id=brand_id,
             video_id=video_id,
-            source="comment_switch_test",
+            source="comment_switch_test_qa" if matched_qa else "comment_switch_test",
             trace_id="comment-switch-test",
         )
         result["enqueued"] = True
