@@ -32,6 +32,10 @@ class OBSPanel:
         on_skip_video,
         on_prioritize_video,
         on_set_video_cooldown,
+        on_choose_qa_folder=None,
+        on_import_qa=None,
+        on_remove_qa=None,
+        on_clear_qa=None,
     ):
         self.frame = ttk.Frame(parent, padding=10)
 
@@ -60,6 +64,10 @@ class OBSPanel:
             on_skip=on_skip_video,
             on_prioritize=on_prioritize_video,
             on_set_cooldown=on_set_video_cooldown,
+            on_choose_qa_folder=on_choose_qa_folder,
+            on_import_qa=on_import_qa,
+            on_remove_qa=on_remove_qa,
+            on_clear_qa=on_clear_qa,
         )
         self.config_component.frame.pack(fill="both", expand=True)
         self.setting_component.frame.pack(fill="both", expand=True)
@@ -118,8 +126,14 @@ class OBSPanel:
         self.playlist_component.now_a_var.set(f"VideoA: {slot_a_name}")
         self.playlist_component.now_b_var.set(f"VideoB: {slot_b_name}")
 
+    def set_qa_catalog(self, qa_catalog: list[dict]):
+        self.playlist_component.set_qa_catalog(qa_catalog)
+
     def get_selected_video_id(self) -> str:
         return self.playlist_component.selected_video_id()
 
     def set_selected_video_id(self, video_id: str):
         self.playlist_component.set_selected_video_id(video_id)
+
+    def get_selected_qa_video_id(self) -> str:
+        return self.playlist_component.selected_qa_video_id()

@@ -4,6 +4,7 @@ import threading
 import time
 from pathlib import Path
 
+from shared.logger import get_logger
 from features.obs.domain.models import OBSConfig
 from features.obs.infrastructure.client import OBSWebSocketClient
 from features.obs.infrastructure.repository import OBSConfigRepository
@@ -22,11 +23,13 @@ class OBSService:
         self._lock = threading.RLock()
         self._import_queue: list[dict] = []
         self._play_queue: list[dict] = []
+        self._qa_queue: list[dict] = []
         self._runner_thread = None
         self._runner_stop = threading.Event()
         self._skip_requested = False
         self._priority_ids: list[str] = []
         self._id_counter = 0
+        self._qa_id_counter = 0
         self._default_cooldown_seconds = 120
         self._active_slot = "A"
         self._slots = {
@@ -35,7 +38,9 @@ class OBSService:
         }
         self._ready_size = 3
         self._next_index = 0
+        self._log = get_logger("obs.runner")
         self._load_catalog()
+        self._log.passed(f"Initialized brand={brand_id} rotate={len(self._import_queue)} qa={len(self._qa_queue)}")  # type: ignore[attr-defined]
 
     def load_config(self) -> OBSConfig:
         return self.repo.load()
@@ -47,32 +52,39 @@ class OBSService:
         except Exception:
             self._default_cooldown_seconds = 120
 
+    @staticmethod
+    def _parse_video_list(raw_list: list) -> list[dict]:
+        result = []
+        for raw in raw_list:
+            if not isinstance(raw, dict):
+                continue
+            path = str(raw.get("path", "")).strip()
+            video_id = str(raw.get("id", "")).strip()
+            if not path or not video_id:
+                continue
+            result.append(
+                {
+                    "id": video_id,
+                    "path": path,
+                    "cooldown_override_seconds": raw.get("cooldown_override_seconds"),
+                    "last_played_at": raw.get("last_played_at"),
+                    "blocked_until": float(raw.get("blocked_until", 0.0) or 0.0),
+                }
+            )
+        return result
+
     def _load_catalog(self):
         with self._lock:
             data = self.catalog_repo.load()
             self._id_counter = int(data.get("id_counter", 0) or 0)
-            videos = []
-            for raw in list(data.get("videos", []) or []):
-                if not isinstance(raw, dict):
-                    continue
-                path = str(raw.get("path", "")).strip()
-                video_id = str(raw.get("id", "")).strip()
-                if not path or not video_id:
-                    continue
-                videos.append(
-                    {
-                        "id": video_id,
-                        "path": path,
-                        "cooldown_override_seconds": raw.get("cooldown_override_seconds"),
-                        "last_played_at": raw.get("last_played_at"),
-                        "blocked_until": float(raw.get("blocked_until", 0.0) or 0.0),
-                    }
-                )
-            self._import_queue = videos
+            self._qa_id_counter = int(data.get("qa_id_counter", 0) or 0)
+            self._import_queue = self._parse_video_list(list(data.get("videos", []) or []))
+            self._qa_queue = self._parse_video_list(list(data.get("qa_videos", []) or []))
+            all_ids = {str(item.get("id")) for item in self._import_queue} | {str(item.get("id")) for item in self._qa_queue}
             self._priority_ids = [
                 str(pid)
                 for pid in list(data.get("priority_ids", []) or [])
-                if any(str(item.get("id")) == str(pid) for item in self._import_queue)
+                if str(pid) in all_ids
             ]
             if self._import_queue:
                 self._next_index %= len(self._import_queue)
@@ -80,21 +92,27 @@ class OBSService:
                 self._next_index = 0
             self._sync_ready_queue_locked()
 
+    @staticmethod
+    def _serialize_video_list(items: list[dict]) -> list[dict]:
+        return [
+            {
+                "id": item.get("id"),
+                "path": item.get("path"),
+                "cooldown_override_seconds": item.get("cooldown_override_seconds"),
+                "last_played_at": item.get("last_played_at"),
+                "blocked_until": item.get("blocked_until", 0.0),
+            }
+            for item in items
+        ]
+
     def _save_catalog_locked(self):
         payload = {
             "schema_version": 1,
             "id_counter": int(self._id_counter),
+            "qa_id_counter": int(self._qa_id_counter),
             "priority_ids": list(self._priority_ids),
-            "videos": [
-                {
-                    "id": item.get("id"),
-                    "path": item.get("path"),
-                    "cooldown_override_seconds": item.get("cooldown_override_seconds"),
-                    "last_played_at": item.get("last_played_at"),
-                    "blocked_until": item.get("blocked_until", 0.0),
-                }
-                for item in self._import_queue
-            ],
+            "videos": self._serialize_video_list(self._import_queue),
+            "qa_videos": self._serialize_video_list(self._qa_queue),
         }
         self.catalog_repo.save(payload)
 
@@ -110,6 +128,56 @@ class OBSService:
                 }
                 for item in self._import_queue
             ]
+
+    def get_qa_catalog(self) -> list[dict]:
+        with self._lock:
+            return [
+                {
+                    "id": item.get("id"),
+                    "path": item.get("path"),
+                    "cooldown_override_seconds": item.get("cooldown_override_seconds"),
+                    "last_played_at": item.get("last_played_at"),
+                    "blocked_until": item.get("blocked_until", 0.0),
+                }
+                for item in self._qa_queue
+            ]
+
+    def import_qa_videos_from_folder(self, folder: str) -> int:
+        folder_path = Path(folder)
+        if not folder_path.exists() or not folder_path.is_dir():
+            raise ValueError("Folder QA video không hợp lệ")
+        files = sorted([str(p.resolve()) for p in folder_path.iterdir() if p.is_file() and self._is_video_file(p)])
+        with self._lock:
+            for file_path in files:
+                self._qa_id_counter += 1
+                self._qa_queue.append(
+                    {
+                        "id": f"QA{self._qa_id_counter:04d}",
+                        "path": file_path,
+                        "cooldown_override_seconds": None,
+                        "last_played_at": None,
+                        "blocked_until": 0.0,
+                    }
+                )
+            self._save_catalog_locked()
+        self._log.info(f"Imported {len(files)} QA videos from {folder}")
+        return len(files)
+
+    def remove_qa_video(self, video_id: str):
+        with self._lock:
+            idx = self._index_of_qa_id_locked(video_id)
+            if idx < 0:
+                raise ValueError("Không tìm thấy QA video ID")
+            self._qa_queue.pop(idx)
+            self._priority_ids = [pid for pid in self._priority_ids if pid != video_id]
+            self._save_catalog_locked()
+
+    def clear_qa_queue(self):
+        with self._lock:
+            qa_ids = {str(item.get("id")) for item in self._qa_queue}
+            self._qa_queue.clear()
+            self._priority_ids = [pid for pid in self._priority_ids if pid not in qa_ids]
+            self._save_catalog_locked()
 
     def status_text(self) -> str:
         if self.client.connected:
@@ -168,6 +236,7 @@ class OBSService:
                 )
             self._sync_ready_queue_locked()
             self._save_catalog_locked()
+        self._log.info(f"Imported {len(files)} rotate videos from {folder}")
         return len(files)
 
     def clear_queues(self):
@@ -221,13 +290,15 @@ class OBSService:
 
     def prioritize_video_by_id(self, video_id: str):
         with self._lock:
-            idx = self._index_of_id_locked(video_id)
-            if idx < 0:
-                raise ValueError("Không tìm thấy video ID trong Queue 1")
+            in_rotate = self._index_of_id_locked(video_id) >= 0
+            in_qa = self._index_of_qa_id_locked(video_id) >= 0
+            if not in_rotate and not in_qa:
+                raise ValueError("Không tìm thấy video ID trong Queue 1 hoặc QA")
             self._priority_ids = [pid for pid in self._priority_ids if pid != video_id]
             self._priority_ids.insert(0, video_id)
             self._sync_ready_queue_locked()
             self._save_catalog_locked()
+        self._log.info(f"Priority set: {video_id}")
 
     def set_video_cooldown(self, video_id: str, cooldown_seconds: int):
         with self._lock:
@@ -287,6 +358,12 @@ class OBSService:
                 return idx
         return -1
 
+    def _index_of_qa_id_locked(self, video_id: str) -> int:
+        for idx, item in enumerate(self._qa_queue):
+            if str(item.get("id", "")) == str(video_id):
+                return idx
+        return -1
+
     def _effective_cooldown_locked(self, item: dict) -> int:
         override = item.get("cooldown_override_seconds")
         if override is not None:
@@ -297,41 +374,51 @@ class OBSService:
         return max(0, int(self._default_cooldown_seconds))
 
     def _pick_next_item_locked(self) -> dict | None:
-        if not self._import_queue:
+        if not self._import_queue and not self._qa_queue:
             return None
         now = time.time()
-        ordered_indices = []
-        used = set()
-        for pid in self._priority_ids:
-            idx = self._index_of_id_locked(pid)
-            if idx >= 0 and idx not in used:
-                ordered_indices.append(idx)
-                used.add(idx)
-        for i in range(len(self._import_queue)):
-            idx = (self._next_index + i) % len(self._import_queue)
-            if idx in used:
-                continue
-            ordered_indices.append(idx)
+        # ordered list of (item, rotate_idx_or_None)
+        candidates: list[tuple[dict, int | None]] = []
+        used_rotate: set[int] = set()
+        used_qa: set[int] = set()
 
-        eligible_idx = None
-        fallback_idx = None
+        # Priority items first (from either queue)
+        for pid in self._priority_ids:
+            r_idx = self._index_of_id_locked(pid)
+            if r_idx >= 0 and r_idx not in used_rotate:
+                candidates.append((self._import_queue[r_idx], r_idx))
+                used_rotate.add(r_idx)
+                continue
+            q_idx = self._index_of_qa_id_locked(pid)
+            if q_idx >= 0 and q_idx not in used_qa:
+                candidates.append((self._qa_queue[q_idx], None))
+                used_qa.add(q_idx)
+
+        # Round-robin rotate videos (QA never rotates)
+        for i in range(len(self._import_queue)):
+            r_idx = (self._next_index + i) % len(self._import_queue)
+            if r_idx not in used_rotate:
+                candidates.append((self._import_queue[r_idx], r_idx))
+
+        eligible: tuple[dict, int | None] | None = None
+        fallback: tuple[dict, int | None] | None = None
         best_wait = None
-        for idx in ordered_indices:
-            item = self._import_queue[idx]
+        for item, r_idx in candidates:
             blocked_until = float(item.get("blocked_until") or 0.0)
             wait = blocked_until - now
             if wait <= 0:
-                eligible_idx = idx
+                eligible = (item, r_idx)
                 break
             if best_wait is None or wait < best_wait:
                 best_wait = wait
-                fallback_idx = idx
+                fallback = (item, r_idx)
 
-        picked_idx = eligible_idx if eligible_idx is not None else fallback_idx
-        if picked_idx is None:
+        chosen = eligible if eligible is not None else fallback
+        if chosen is None:
             return None
-        picked = self._import_queue[picked_idx]
-        self._next_index = (picked_idx + 1) % len(self._import_queue)
+        picked, r_idx = chosen
+        if r_idx is not None:
+            self._next_index = (r_idx + 1) % len(self._import_queue)
         self._priority_ids = [pid for pid in self._priority_ids if pid != picked.get("id")]
         return picked
 
@@ -347,6 +434,7 @@ class OBSService:
 
     def _play_to_slot(self, cfg: OBSConfig, slot: str, item: dict):
         file_path = str(item.get("path", ""))
+        self._log.info(f"Playing slot={slot} id={item.get('id')} file={Path(file_path).name}")
         source = self._source_of(cfg, slot)
         other_slot = "B" if slot == "A" else "A"
         other_source = self._source_of(cfg, other_slot)
@@ -364,10 +452,37 @@ class OBSService:
 
     def _prepare_slot(self, cfg: OBSConfig, slot: str, item: dict):
         file_path = str(item.get("path", ""))
+        self._log.info(f"Prepare slot={slot} id={item.get('id')} file={Path(file_path).name}")
         source = self._source_of(cfg, slot)
         self.client.set_media_local_file(source, file_path)
         self.client.set_source_visibility(cfg.scene_name, source, False)
         self._slots[slot] = {"file": file_path, "item": item, "started": False, "prepared": True}
+
+    def _should_reprepare_standby_locked(self, standby: str) -> bool:
+        """True nếu standby slot nên bị replace bởi item priority cao hơn.
+
+        Placeholder: hiện tại trigger khi top priority_id khác prepared item.
+        Future: so sánh priority score để quyết định eviction.
+        """
+        slot = self._slots[standby]
+        if not slot["prepared"] or slot["started"]:
+            return False
+        if not self._priority_ids:
+            return False
+        prepared_id = (slot["item"] or {}).get("id")
+        return self._priority_ids[0] != prepared_id
+
+    def _reprepare_standby_if_needed(self, cfg: OBSConfig, standby: str) -> None:
+        """Replace standby slot với priority item nếu priority thay đổi."""
+        with self._lock:
+            should = self._should_reprepare_standby_locked(standby)
+            old_id = (self._slots[standby]["item"] or {}).get("id")
+        if not should:
+            return
+        next_item = self._next_from_play_queue()
+        if next_item:
+            self._log.info(f"Re-prepare standby={standby}: {old_id} → {next_item.get('id')}")
+            self._prepare_slot(cfg, standby, next_item)
 
     def _hide_slot(self, cfg: OBSConfig, slot: str):
         source = self._source_of(cfg, slot)
@@ -396,6 +511,7 @@ class OBSService:
             self._reset_slots()
             self._runner_thread = threading.Thread(target=self._runner_loop, args=(cfg,), daemon=True)
             self._runner_thread.start()
+        self._log.info("Runner started")
 
     def stop_queue_runner(self):
         self._runner_stop.set()
@@ -403,6 +519,7 @@ class OBSService:
         if t and t.is_alive():
             t.join(timeout=1.2)
         self._runner_thread = None
+        self._log.info("Runner stopped")
 
     def _runner_loop(self, cfg: OBSConfig):
         try:
@@ -419,6 +536,7 @@ class OBSService:
                 active = self._active_slot
                 standby = "B" if active == "A" else "A"
                 active_source = self._source_of(cfg, active)
+                self._reprepare_standby_if_needed(cfg, standby)
 
                 if not self._slots[active]["started"]:
                     next_item = self._next_from_play_queue()
@@ -462,6 +580,7 @@ class OBSService:
 
             except Exception as ex:
                 self._last_error = str(ex)
+                self._log.error(f"Runner error: {ex}")
             time.sleep(0.15)
 
         try:

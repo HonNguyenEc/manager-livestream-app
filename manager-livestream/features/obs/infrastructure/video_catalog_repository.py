@@ -23,7 +23,9 @@ class OBSVideoCatalogRepository:
         return {
             "schema_version": int(data.get("schema_version", 1) or 1),
             "id_counter": int(data.get("id_counter", 0) or 0),
+            "qa_id_counter": int(data.get("qa_id_counter", 0) or 0),
             "videos": list(data.get("videos", []) or []),
+            "qa_videos": list(data.get("qa_videos", []) or []),
         }
 
     def save(self, payload: dict) -> None:

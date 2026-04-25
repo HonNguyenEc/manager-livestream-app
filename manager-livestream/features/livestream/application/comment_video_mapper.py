@@ -8,6 +8,9 @@ import unicodedata
 from pathlib import Path
 
 from features.livestream.config import ensure_brand_data_dir
+from shared.logger import get_logger
+
+_log = get_logger("comment.mapper")
 
 
 def normalize_text(value: str) -> str:
@@ -70,9 +73,13 @@ class CommentVideoMapper:
     """Handle CSV mapping lifecycle and matching logic."""
 
     FILE_NAME = "comment_video_mapping.csv"
+    QA_FILE_NAME = "qa_video_mapping.csv"
 
     def mapping_path(self, brand_id: str) -> Path:
         return ensure_brand_data_dir(brand_id) / "obs" / self.FILE_NAME
+
+    def qa_mapping_path(self, brand_id: str) -> Path:
+        return ensure_brand_data_dir(brand_id) / "obs" / self.QA_FILE_NAME
 
     @staticmethod
     def _read_rows_with_fallback(path: Path) -> list[dict]:
@@ -124,6 +131,84 @@ class CommentVideoMapper:
 
         return path
 
+    def ensure_qa_mapping_csv(self, brand_id: str, qa_catalog: list[dict]) -> Path:
+        """Generate QA mapping CSV with columns: STT, Câu hỏi, Trả lời.
+
+        STT maps 1-to-1 with QA video order (STT=1 → QA0001).
+        User fills 'Câu hỏi' with keywords; 'Trả lời' is informational only.
+        """
+        path = self.qa_mapping_path(brand_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Preserve existing user-filled data keyed by STT
+        existing: dict[str, dict] = {}
+        if path.exists():
+            for row in self._read_rows_with_fallback(path):
+                stt = normalize_text((row or {}).get("STT", ""))
+                if stt:
+                    existing[stt] = {
+                        "cau_hoi": normalize_text((row or {}).get("Câu hỏi", "")),
+                        "tra_loi": normalize_text((row or {}).get("Trả lời", "")),
+                    }
+
+        rows = []
+        for i, item in enumerate(qa_catalog, start=1):
+            stt = str(i)
+            prev = existing.get(stt, {})
+            rows.append(
+                {
+                    "STT": stt,
+                    "Câu hỏi": prev.get("cau_hoi", ""),
+                    "Trả lời": prev.get("tra_loi", ""),
+                }
+            )
+
+        try:
+            with path.open("w", encoding="utf-8-sig", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=["STT", "Câu hỏi", "Trả lời"])
+                writer.writeheader()
+                writer.writerows(rows)
+        except PermissionError:
+            return path
+
+        return path
+
+    def resolve_qa_video_id_from_comments(self, comments: list[str], qa_mapping_csv_path: Path, qa_catalog: list[dict]) -> str | None:
+        """Match comments against 'Câu hỏi' column; return QA video ID by STT position."""
+        if not qa_mapping_csv_path.exists() or not comments or not qa_catalog:
+            return None
+
+        candidates: list[tuple[str, str]] = []  # (stt, cau_hoi)
+        for row in self._read_rows_with_fallback(qa_mapping_csv_path):
+            stt = normalize_text((row or {}).get("STT", ""))
+            cau_hoi = normalize_text((row or {}).get("Câu hỏi", ""))
+            if stt and cau_hoi:
+                candidates.append((stt, cau_hoi))
+
+        best_stt: str | None = None
+        best_score = 0
+
+        for comment in comments:
+            text = normalize_text(comment)
+            if not text:
+                continue
+            for stt, cau_hoi in candidates:
+                score = _score(text, cau_hoi)
+                if score > best_score:
+                    best_score = score
+                    best_stt = stt
+
+        if not best_stt or best_score == 0:
+            _log.info(f"QA: no match for {comments}")
+            return None
+
+        stt_int = int(best_stt) - 1
+        if 0 <= stt_int < len(qa_catalog):
+            matched_id = str(qa_catalog[stt_int].get("id", ""))
+            _log.info(f"QA match: {matched_id} (stt={best_stt} score={best_score})")
+            return matched_id
+        return None
+
     def resolve_video_id_from_comments(self, comments: list[str], mapping_csv_path: Path) -> str | None:
         if not mapping_csv_path.exists() or not comments:
             return None
@@ -151,4 +236,8 @@ class CommentVideoMapper:
                     best_score = final_score
                     best_video_id = video_id
 
-        return best_video_id if best_score > 0 else None
+        if best_video_id and best_score > 0:
+            _log.info(f"Rotate match: {best_video_id} score={best_score}")
+            return best_video_id
+        _log.info(f"Rotate: no match for {comments}")
+        return None

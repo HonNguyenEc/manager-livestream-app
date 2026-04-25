@@ -4,6 +4,7 @@ import json
 import os
 import queue
 import subprocess
+import sys
 import threading
 import tkinter as tk
 from pathlib import Path
@@ -38,6 +39,15 @@ from shared.storage import read_json, write_json
 
 
 logger = get_logger("feature.livestream.ui")
+
+
+def _open_file(path: str):
+    if os.name == "nt":
+        os.startfile(path)  # type: ignore[attr-defined]
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", path])
+    else:
+        subprocess.Popen(["xdg-open", path])
 
 
 class LiveShopeeManagerUI:
@@ -112,7 +122,9 @@ class LiveShopeeManagerUI:
             on_get_comment=self.get_comment_async,
             on_test_comment_switch=self.test_comment_switch_async,
             on_open_mapping_csv=self.open_mapping_csv,
+            on_open_qa_mapping_csv=self.open_qa_mapping_csv,
             on_open_ocr_log=self.open_ocr_log,
+            on_comment_setup_shown=self._refresh_comment_setup_tab,
             on_select_ocr_region=self.select_ocr_region,
             on_start_ocr=self.start_ocr,
             on_stop_ocr=self.stop_ocr,
@@ -138,6 +150,10 @@ class LiveShopeeManagerUI:
             on_skip_video=self.obs_skip_video,
             on_prioritize_video=self.obs_prioritize_video,
             on_set_video_cooldown=self.obs_set_video_cooldown,
+            on_choose_qa_folder=self.obs_choose_qa_folder,
+            on_import_qa=self.obs_import_qa,
+            on_remove_qa=self.obs_remove_qa,
+            on_clear_qa=self.obs_clear_qa,
         )
         self.obs_panel.frame.pack(fill="both", expand=True)
         self.output_panel = OutputPanel(container)
@@ -233,6 +249,7 @@ class LiveShopeeManagerUI:
         self.obs_panel.set_status(svc.status_text())
         queue_state = svc.get_queue_state()
         self.obs_panel.set_queue_state(queue_state)
+        self.obs_panel.set_qa_catalog(svc.get_qa_catalog())
         self._set_comment_video_status(queue_state)
 
     @staticmethod
@@ -313,6 +330,7 @@ class LiveShopeeManagerUI:
             svc = self._obs_service(self.active_brand)
             queue_state = svc.get_queue_state()
             self.obs_panel.set_queue_state(queue_state)
+            self.obs_panel.set_qa_catalog(svc.get_qa_catalog())
             self._set_comment_video_status(queue_state)
         except Exception:
             pass
@@ -324,29 +342,42 @@ class LiveShopeeManagerUI:
             brand_id = self.active_brand
             catalog = self._obs_service(brand_id).get_video_catalog()
             mapping_path = self.comment_switch_service.mapper.ensure_mapping_csv(brand_id, catalog)
-
-            if os.name == "nt":
-                os.startfile(str(mapping_path))  # type: ignore[attr-defined]
-            elif os.name == "posix":
-                subprocess.Popen(["xdg-open", str(mapping_path)])
-            else:
-                subprocess.Popen(["open", str(mapping_path)])
-
+            _open_file(str(mapping_path))
             self._append(f"[SUCCESS][{brand_id}] Đã mở file mapping CSV: {mapping_path}")
         except Exception as ex:
             self._append(f"[ERROR][{self.active_brand}] Mở mapping CSV lỗi: {ex}")
+        finally:
+            self._refresh_comment_setup_tab()
+
+    def open_qa_mapping_csv(self):
+        try:
+            brand_id = self.active_brand
+            qa_catalog = self._obs_service(brand_id).get_qa_catalog()
+            qa_path = self.comment_switch_service.mapper.ensure_qa_mapping_csv(brand_id, qa_catalog)
+            _open_file(str(qa_path))
+            self._append(f"[SUCCESS][{brand_id}] Đã mở QA mapping CSV: {qa_path}")
+        except Exception as ex:
+            self._append(f"[ERROR][{self.active_brand}] Mở QA mapping CSV lỗi: {ex}")
+        finally:
+            self._refresh_comment_setup_tab()
+
+    def _refresh_comment_setup_tab(self):
+        try:
+            brand_id = self.active_brand
+            svc = self._obs_service(brand_id)
+            mapper = self.comment_switch_service.mapper
+            rotate_path = mapper.ensure_mapping_csv(brand_id, svc.get_video_catalog())
+            qa_path = mapper.ensure_qa_mapping_csv(brand_id, svc.get_qa_catalog())
+            self.action_tabs.comment_setup.refresh(rotate_path, qa_path)
+        except Exception:
+            pass
 
     def open_ocr_log(self):
         try:
             brand_id = self.active_brand
             log_path = self.comment_switch_service.ensure_ocr_log_file(brand_id)
 
-            if os.name == "nt":
-                os.startfile(str(log_path))  # type: ignore[attr-defined]
-            elif os.name == "posix":
-                subprocess.Popen(["xdg-open", str(log_path)])
-            else:
-                subprocess.Popen(["open", str(log_path)])
+            _open_file(str(log_path))
 
             self._append(f"[SUCCESS][{brand_id}] Đã mở OCR log: {log_path}")
             self._append(
@@ -848,3 +879,42 @@ class LiveShopeeManagerUI:
             self._append(f"[SUCCESS][{self.active_brand}] Set cooldown {seconds}s cho ID: {video_id}")
         except Exception as ex:
             self._append(f"[ERROR][{self.active_brand}] Set cooldown lỗi: {ex}")
+
+    def obs_choose_qa_folder(self):
+        folder = filedialog.askdirectory(title="Chọn thư mục chứa QA video")
+        if not folder:
+            return
+        self.obs_panel.playlist_component.qa_folder_var.set(folder)
+
+    def obs_import_qa(self):
+        try:
+            svc = self._obs_service(self.active_brand)
+            folder = self.obs_panel.playlist_component.qa_folder_var.get().strip()
+            if not folder:
+                raise ValueError("Vui lòng chọn thư mục QA video")
+            imported = svc.import_qa_videos_from_folder(folder)
+            self.obs_panel.set_qa_catalog(svc.get_qa_catalog())
+            self._append(f"[SUCCESS][{self.active_brand}] Import {imported} QA video")
+        except Exception as ex:
+            self._append(f"[ERROR][{self.active_brand}] Import QA video lỗi: {ex}")
+
+    def obs_remove_qa(self):
+        try:
+            svc = self._obs_service(self.active_brand)
+            video_id = self.obs_panel.get_selected_qa_video_id().strip()
+            if not video_id:
+                raise ValueError("Vui lòng chọn QA video cần xoá")
+            svc.remove_qa_video(video_id)
+            self.obs_panel.set_qa_catalog(svc.get_qa_catalog())
+            self._append(f"[SUCCESS][{self.active_brand}] Đã xoá QA video: {video_id}")
+        except Exception as ex:
+            self._append(f"[ERROR][{self.active_brand}] Remove QA video lỗi: {ex}")
+
+    def obs_clear_qa(self):
+        try:
+            svc = self._obs_service(self.active_brand)
+            svc.clear_qa_queue()
+            self.obs_panel.set_qa_catalog(svc.get_qa_catalog())
+            self._append(f"[SUCCESS][{self.active_brand}] Đã clear toàn bộ QA video")
+        except Exception as ex:
+            self._append(f"[ERROR][{self.active_brand}] Clear QA lỗi: {ex}")

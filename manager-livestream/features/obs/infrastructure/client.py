@@ -1,5 +1,16 @@
 """Low-level OBS websocket client adapter."""
 
+from shared.logger import get_logger
+
+_log = get_logger("obs.client")
+
+try:
+    import obsws_python as _chk  # noqa: F401
+    del _chk
+    _log.passed("obsws_python ready")  # type: ignore[attr-defined]
+except ImportError as _ex:
+    _log.error(f"obsws_python missing — OBS will not connect: {_ex}")
+
 
 def _safe_get(data, *keys, default=None):
     for key in keys:
@@ -28,12 +39,13 @@ class OBSWebSocketClient:
 
         self._client = obs.ReqClient(host=host, port=port, password=password, timeout=timeout)
         version = self._client.get_version()
-        return {
-            "obs_version": getattr(version, "obs_version", "unknown"),
-            "rpc_version": getattr(version, "rpc_version", "unknown"),
-        }
+        obs_ver = getattr(version, "obs_version", "unknown")
+        _log.info(f"Connected to {host}:{port} obs_version={obs_ver}")
+        return {"obs_version": obs_ver, "rpc_version": getattr(version, "rpc_version", "unknown")}
 
     def disconnect(self):
+        if self._client is not None:
+            _log.info("Disconnected from OBS")
         self._client = None
 
     def list_scenes(self) -> list[str]:
